@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+requests
+faiss-cpu
+python-docx
+pdfminer.six
+pillow
+pytesseract
