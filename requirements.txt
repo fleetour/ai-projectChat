@@ -6,3 +6,5 @@ python-docx
 pdfminer.six
 pillow
 pytesseract
+qdrant-client
+dotenv
