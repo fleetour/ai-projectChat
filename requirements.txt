@@ -8,3 +8,4 @@ pillow
 pytesseract
 qdrant-client
 dotenv
+ollama
