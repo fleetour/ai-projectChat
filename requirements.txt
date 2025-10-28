@@ -9,3 +9,4 @@ pytesseract
 qdrant-client
 dotenv
 ollama
+aiohttp

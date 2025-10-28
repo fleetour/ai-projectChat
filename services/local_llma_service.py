@@ -1,7 +1,7 @@
 import subprocess
 import json
 import asyncio
-from typing import List, Optional
+from typing import List, Optional, AsyncGenerator
 import logging
 import os
 
@@ -120,28 +120,89 @@ class LocalLlamaService:
             logger.error(f"Error in chat completion: {e}")
             return "I'm sorry, I couldn't process your request at the moment."
     
+    async def get_llama_stream_completion(self, prompt: str, context: str = "") -> AsyncGenerator[str, None]:
+        """Stream completion using local Llama model"""
+        full_prompt = self._build_prompt(prompt, context)
+        
+        try:
+            import aiohttp
+            import json
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    "http://localhost:11434/api/generate",
+                    json={
+                        "model": self.model,
+                        "prompt": full_prompt,
+                        "stream": True,
+                        "options": {
+                            "temperature": 0.3,
+                            "top_p": 0.9,
+                            "num_predict": 1000
+                        }
+                    },
+                    timeout=aiohttp.ClientTimeout(total=120)
+                ) as response:
+                    
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"Stream API error: {response.status} - {error_text}")
+                        yield "I'm sorry, I encountered an error processing your request."
+                        return
+                    
+                    async for line in response.content:
+                        line = line.decode('utf-8').strip()
+                        if line:
+                            try:
+                                data = json.loads(line)
+                                if 'response' in data:
+                                    chunk = data['response']
+                                    yield chunk
+                                
+                                # Check if this is the final response
+                                if data.get('done', False):
+                                    logger.info("✅ Stream completion finished")
+                                    break
+                                    
+                            except json.JSONDecodeError:
+                                logger.warning(f"Failed to parse JSON: {line}")
+                                continue
+                            except Exception as e:
+                                logger.error(f"Error processing stream chunk: {e}")
+                                continue
+                
+        except asyncio.TimeoutError:
+            logger.error("Stream request timed out")
+            yield "I'm sorry, the request timed out."
+        except Exception as e:
+            logger.error(f"Error in stream completion: {e}")
+            yield "I'm sorry, I couldn't process your request at the moment."
+    
+    # In deiner local_llama_service.py - _build_prompt Methode anpassen
     def _build_prompt(self, question: str, context: str = "") -> str:
-        """Build the prompt for the model"""
+        """Build the prompt for the model with markdown formatting"""
         if context:
             return f"""Based on the following context, please answer the question. If the context doesn't contain enough information to answer the question, please say so.
 
-Context:
-{context}
+    IMPORTANT: Format your response using Markdown for better readability:
+    - Use **bold** for important terms
+    - Use *italic* for emphasis  
+    - Use `code` for technical terms
+    - Use lists with - or * for multiple items
+    - Use headings with ## when appropriate
 
-Question: {question}
+    Context:
+    {context}
 
-Answer:"""
+    Question: {question}
+
+    Answer in Markdown format:"""
         else:
-            return question
-    
-    def _clean_text(self, text: str) -> str:
-        """Clean text for processing"""
-        if not text:
-            return ""
-        text = ' '.join(text.split())
-        if len(text.strip()) < 10:
-            return ""
-        return text.strip()
+            return f"""Please answer the following question using Markdown formatting for better readability:
 
-# Global instance
+    Question: {question}
+
+    Answer in Markdown format:"""
+
+    # Global instance
 local_llama = LocalLlamaService(model="llama3:8b")

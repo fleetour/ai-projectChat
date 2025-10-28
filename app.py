@@ -1,5 +1,5 @@
-from fastapi import FastAPI, Form, HTTPException, UploadFile, File
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Form, HTTPException, Response, UploadFile, File
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import List
 import os
@@ -10,11 +10,13 @@ from typing import List, Dict, Any
 from services.embeddings_service import extract_text_from_file, get_embeddings_from_llama, get_llama_chat_completion, save_embeddings_with_path
 from services.file_service import  build_file_structure_tree, normalize_target_path
 import logging
-from db.qdrant_service import ensure_collection, get_qdrant_client, save_embeddings, search_similar
+from db.qdrant_service import ensure_collection, get_qdrant_client,  search_similar
 from services.embeddings_service import  extract_text_from_file
 from qdrant_client import models 
 from typing import Optional
 from pydantic import BaseModel
+
+from services.local_llma_service import LocalLlamaService
 
 # === CONFIGURATION ===
 FILES_DIR = "uploaded_files"
@@ -198,6 +200,69 @@ async def query_docs(request: QueryRequest):
             content={"error": f"Failed to process query: {str(e)}"}, 
             status_code=500
         )
+    
+@app.post("/query-stream")
+async def query_docs_stream(request: QueryRequest, response: Response):
+    """Streaming version of query endpoint"""
+    collection_name = f"customer_{CUSTOMER_ID}_documents"
+    
+    async def generate():
+        try:
+            # Get embedding for the query
+            query_emb = get_embeddings_from_llama([request.query])[0]
+            
+            # Search for similar chunks
+            results = search_similar(collection_name, query_emb, request.fileIds, request.top_k)
+            
+            # Extract context
+            top_chunks = [r.payload["text"] for r in results]
+            context = "\n\n".join(top_chunks)
+            
+            # Create prompt
+            prompt = f"Answer the question based on the following text:\n\n{context}\n\nQuestion: {request.query}\nAnswer:"
+            
+            logger.info(f"Starting stream for query: {request.query}")
+            
+            # Stream response from Llama
+            full_answer = ""
+            async for chunk in local_llama.get_llama_stream_completion(request.query, context):
+                full_answer += chunk
+                yield f"data: {json.dumps({'type': 'content', 'content': chunk})}\n\n"
+            
+            # Send sources
+            formatted_results = [
+                {
+                    "file_id": r.payload["file_id"],
+                    "filename": r.payload["filename"],
+                    "score": r.score,
+                    "text": r.payload["text"]
+                }
+                for r in results
+            ]
+            
+            yield f"data: {json.dumps({'type': 'sources', 'sources': formatted_results})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'content': full_answer})}\n\n"
+            
+            logger.info(f"✅ Stream completed successfully. Response length: {len(full_answer)}")
+            
+        except Exception as e:
+            error_msg = f"Error in stream processing: {str(e)}"
+            logger.error(error_msg)
+            yield f"data: {json.dumps({'type': 'error', 'error': error_msg})}\n\n"
+    
+    return StreamingResponse(
+        generate(),
+        media_type="text/plain",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+            "X-Accel-Buffering": "no"  # Important for streaming
+        }
+    )
+
+
+
 
 @app.get("/files")
 async def get_files():
@@ -229,3 +294,5 @@ async def health_check():
             "llama": "error",
             "error": str(e)
         }
+
+local_llama = LocalLlamaService(model="llama3:8b")
