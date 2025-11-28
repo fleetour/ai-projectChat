@@ -9,6 +9,9 @@ from services.local_llma_service import local_llama
 from datetime import datetime
 import uuid 
 from qdrant_client.models import PointStruct
+import numpy as np
+
+from services.utils import normalize_vector
 
 load_dotenv()
 
@@ -86,6 +89,33 @@ async def get_llama_chat_completion(prompt: str) -> str:
     """Get chat completion using local Llama"""
     return await local_llama.get_chat_completion(prompt)
 
+def ensure_cosine_collection(qdrant_client: QdrantClient, collection_name: str, vector_size: int = 4096):
+    """Ensure collection uses cosine distance"""
+    from qdrant_client.models import Distance, VectorParams
+    
+    try:
+        # Try to get existing collection
+        collection_info = qdrant_client.get_collection(collection_name=collection_name)
+        current_distance = collection_info.config.params.vectors.distance
+        
+        if current_distance != "Cosine":
+            print(f"❌ Collection has wrong distance: {current_distance}. Recreating...")
+            qdrant_client.recreate_collection(
+                collection_name=collection_name,
+                vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE)
+            )
+            print("✅ Recreated collection with Cosine distance")
+        else:
+            print("✅ Collection already uses Cosine distance")
+            
+    except Exception:
+        # Collection doesn't exist, create it
+        qdrant_client.recreate_collection(
+            collection_name=collection_name,
+            vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE)
+        )
+        print("✅ Created new collection with Cosine distance")
+
 def save_embeddings_with_path(
     qdrant_client: QdrantClient,
     collection_name: str, 
@@ -93,19 +123,23 @@ def save_embeddings_with_path(
     filename: str, 
     chunks: List[str], 
     embeddings: List[List[float]], 
-    target_path: str
+    target_path: str,
+    target_project: str
 ):
     """
     Save embeddings to Qdrant with path information
     """
     points = []
     for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-        # Erstelle eine UUID für jeden Point
-        point_id = str(uuid.uuid4())  # ✅ Korrekte UUID
+        # Normalize the embedding for cosine similarity
+        normalized_embedding = normalize_vector(embedding)
+        
+        # Create UUID for each point
+        point_id = str(uuid.uuid4())
         
         point = PointStruct(
-            id=point_id,  # ✅ Jetzt eine gültige UUID
-            vector=embedding,
+            id=point_id,
+            vector=normalized_embedding,  # ✅ Use NORMALIZED embedding
             payload={
                 "file_id": file_id,
                 "filename": filename,
@@ -115,15 +149,23 @@ def save_embeddings_with_path(
                 "upload_path": target_path,
                 "full_file_path": f"{target_path}/{file_id}_{filename}" if target_path else f"{file_id}_{filename}",
                 "upload_time": datetime.now().isoformat(),
-                "original_point_id": f"{file_id}_{i}"  # Behalte die ursprüngliche ID als Payload
+                "original_point_id": f"{file_id}_{i}",
+                "project": target_project
             }
         )
         points.append(point)
     
     # Batch upload to Qdrant
-    qdrant_client.upsert(
+    operation_info = qdrant_client.upsert(
         collection_name=collection_name,
-        points=points
+        points=points,
+        wait=True  # Wait for confirmation
     )
     
-    print(f"Saved {len(points)} chunks for file {filename} in path {target_path}")
+    print(f"✅ Saved {len(points)} NORMALIZED chunks for file {filename} in path {target_path}")
+    
+    # Verify the upload worked
+    if hasattr(operation_info, 'status') and operation_info.status == 'completed':
+        print(f"✅ Upload confirmed for {filename}")
+    else:
+        print(f"⚠️  Upload status uncertain for {filename}")

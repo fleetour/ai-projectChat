@@ -46,22 +46,39 @@ def qdrant_session():
         raise
     # Note: We don't close the client here as it's meant to be reused
 
-def ensure_collection(collection_name: str, vector_size: int):
-    """Ensure collection exists for this customer."""
-    client = get_qdrant_client()
+def ensure_cosine_collection(qdrant_client: QdrantClient, collection_name: str, vector_size: int = 384):
+    """Ensure collection uses cosine distance - CORRECTED"""
     try:
-        existing = [c.name for c in client.get_collections().collections]
-        if collection_name not in existing:
-            client.create_collection(
+        # Try to get existing collection
+        collection_info = qdrant_client.get_collection(collection_name=collection_name)
+        current_distance = collection_info.config.params.vectors.distance
+        
+        print(f"📋 Current collection distance: {current_distance}")
+        
+        if current_distance != "Cosine":
+            print(f"❌ Wrong distance metric: {current_distance}. Recreating collection...")
+            qdrant_client.delete_collection(collection_name=collection_name)
+            qdrant_client.create_collection(
                 collection_name=collection_name,
-                vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+                vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE)
             )
-            logger.info(f"✅ Created collection: {collection_name}")
+            print("✅ Recreated collection with Cosine distance")
         else:
-            logger.info(f"✅ Collection exists: {collection_name}")
+            print("✅ Collection already uses Cosine distance")
+            
     except Exception as e:
-        logger.error(f"❌ Error ensuring collection {collection_name}: {e}")
-        raise
+        # Collection doesn't exist, create it
+        print(f"ℹ️ Collection doesn't exist, creating new one: {e}")
+        qdrant_client.create_collection(
+            collection_name=collection_name,
+            vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE)
+        )
+        print("✅ Created new collection with Cosine distance")
+
+def ensure_collection(collection_name: str, vector_size: int = 384):
+    """Wrapper that calls ensure_cosine_collection"""
+    qdrant_client = get_qdrant_client()
+    ensure_cosine_collection(qdrant_client, collection_name, vector_size)
 
 def save_embeddings(collection_name: str, file_id: str, filename: str, chunks: list, embeddings: list):
     """Save embeddings and their metadata to Qdrant."""
@@ -103,6 +120,7 @@ def search_similar(collection_name: str, query_vector: list, file_ids: list, top
             query_vector=query_vector,
             limit=top_k,
             query_filter=query_filter,
+            with_payload=True, 
         )
         logger.info(f"✅ Search found {len(results)} results from {collection_name}")
         return results
@@ -152,3 +170,44 @@ def close_connection():
         # QdrantClient doesn't have an explicit close method, but we can nullify it
         _client = None
         logger.info("✅ Qdrant connection closed")
+
+
+def test_exact_vector_search(collection_name: str):
+    """Test by searching for an exact existing vector"""
+    client = get_qdrant_client()
+    
+    try:
+        # Get first few points from the collection
+        points = client.scroll(
+            collection_name=collection_name,
+            limit=3,
+            with_payload=True,
+            with_vectors=True  # Get the actual vectors
+        )
+        
+        if not points[0]:
+            print("❌ No points found in collection")
+            return
+            
+        print("🧪 TEST: Searching with exact vectors from collection")
+        
+        for point in points[0]:
+            if point.vector:
+                # Search using the exact same vector
+                results = client.search(
+                    collection_name=collection_name,
+                    query_vector=point.vector,
+                    limit=3,
+                    with_payload=True
+                )
+                
+                print(f"📊 Search with vector ID {point.id}:")
+                for result in results:
+                    print(f"   Result ID: {result.id}, Score: {result.score}")
+                    
+                # The first result should have score ~1.0 for cosine similarity
+                if results and results[0].score < 0.9:
+                    print("❌ WARNING: Exact vector search returned low score!")
+                    
+    except Exception as e:
+        print(f"❌ Test failed: {e}")

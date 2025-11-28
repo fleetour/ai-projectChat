@@ -1,3 +1,5 @@
 .env
 /uploaded_files/
 ./uploaded_files/
+/projects/
+./projects/

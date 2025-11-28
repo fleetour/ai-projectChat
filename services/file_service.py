@@ -40,7 +40,7 @@ def normalize_target_path(target_path: str) -> str:
 
 
 
-async def build_file_structure_tree(FILES_DIR: str, collection_name: str) -> List[Dict[str, Any]]:
+async def build_file_structure_tree(projectName: str, FILES_DIR: str, collection_name: str) -> List[Dict[str, Any]]:
     """Build the file structure as a tree for TreeList components with folder support"""
     
     # Get all files from the uploaded_files directory (recursively)
@@ -66,7 +66,8 @@ async def build_file_structure_tree(FILES_DIR: str, collection_name: str) -> Lis
                                 "filename": original_filename,
                                 "uploaded_name": filename,
                                 "file_path": file_path,
-                                "relative_path": relative_path
+                                "relative_path": relative_path,
+                                "project": projectName
                             })
                             
         print(f"Total files found in filesystem: {len(uploaded_files)}")
@@ -106,7 +107,8 @@ async def build_file_structure_tree(FILES_DIR: str, collection_name: str) -> Lis
                 "chunks": 0,
                 "file_path": ufile["file_path"],
                 "relative_path": ufile["relative_path"],
-                "uploaded_name": ufile["uploaded_name"]
+                "uploaded_name": ufile["uploaded_name"],
+                "project": ufile["project"]
             }
     
    
@@ -522,7 +524,8 @@ async def get_files_from_qdrant(collection_name: str) -> List[Dict[str, Any]]:
                         "chunks": 0,
                         "upload_path": payload.get("upload_path", ""),  # Pfad aus Qdrant
                         "full_file_path": payload.get("full_file_path", ""),
-                        "upload_date": payload.get("upload_time")  # Upload-Datum
+                        "upload_date": payload.get("upload_time"), # Upload-Datum
+                        "project": payload.get("project")  #projectId
                     }
                 files[file_id]["chunks"] += 1
         

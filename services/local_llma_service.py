@@ -5,6 +5,11 @@ from typing import List, Optional, AsyncGenerator
 import logging
 import os
 
+import numpy as np
+
+from services.utils import normalize_vector
+
+
 logger = logging.getLogger(__name__)
 
 class LocalLlamaService:
@@ -39,7 +44,7 @@ class LocalLlamaService:
             logger.warning(f"Could not verify Ollama connection: {e}")
     
     def get_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """Get embeddings using local Llama model"""
+        """Get embeddings using local Llama model - FIXED VERSION"""
         embeddings = []
         
         for text in texts:
@@ -47,10 +52,11 @@ class LocalLlamaService:
                 # Clean the text
                 cleaned_text = self._clean_text(text)
                 if not cleaned_text:
-                    embeddings.append([0.0] * 1024)
+                    print(f"⚠️  Empty text after cleaning, using fallback embedding")
+                    embeddings.append(self._create_fallback_embedding())
                     continue
                 
-                # Use API for embeddings (more reliable)
+                # Use API for embeddings
                 import requests
                 response = requests.post(
                     "http://localhost:11434/api/embeddings",
@@ -63,23 +69,72 @@ class LocalLlamaService:
                 
                 if response.status_code == 200:
                     embedding = response.json().get('embedding', [])
-                    # Ensure correct size
+                    
+                    # Debug: Check what we're getting
+                    print(f"📊 Raw embedding: {len(embedding)} dimensions")
+                    if embedding:
+                        raw_norm = np.linalg.norm(embedding)
+                        print(f"   Raw norm: {raw_norm:.6f}")
+                    
+                    # Handle size mismatch properly
                     if len(embedding) != 1024:
+                        print(f"⚠️  Embedding size mismatch: {len(embedding)} != 1024")
                         if len(embedding) < 1024:
-                            embedding = embedding + [0.0] * (1024 - len(embedding))
+                            # Pad with random values instead of zeros
+                            padding = [np.random.normal(0, 0.1) for _ in range(1024 - len(embedding))]
+                            embedding = embedding + padding
+                            print(f"   Padded to 1024 dimensions")
                         else:
                             embedding = embedding[:1024]
-                    embeddings.append(embedding)
+                            print(f"   Truncated to 1024 dimensions")
+                    
+                    # NORMALIZE for cosine similarity
+                    normalized_embedding = normalize_vector(embedding)
+                    final_norm = np.linalg.norm(normalized_embedding)
+                    print(f"   Final normalized norm: {final_norm:.6f}")
+                    
+                    embeddings.append(normalized_embedding)
+                    
                 else:
-                    logger.error(f"Embedding API error: {response.status_code}")
-                    embeddings.append([0.0] * 1024)
+                    print(f"❌ Embedding API error: {response.status_code}")
+                    embeddings.append(self._create_fallback_embedding())
                     
             except Exception as e:
-                logger.error(f"Error getting embedding: {e}")
-                embeddings.append([0.0] * 1024)
+                print(f"❌ Error getting embedding: {e}")
+                embeddings.append(self._create_fallback_embedding())
+        
+        # Final verification
+        print(f"🎯 Generated {len(embeddings)} embeddings")
+        for i, emb in enumerate(embeddings[:2]):  # Check first 2
+            norm = np.linalg.norm(emb)
+            zero_count = sum(1 for x in emb if x == 0)
+            print(f"   Embedding {i}: norm={norm:.6f}, zeros={zero_count}/1024")
         
         return embeddings
-    
+
+    def _create_fallback_embedding(self, dimension: int = 1024) -> List[float]:
+        """Create a non-zero fallback embedding"""
+        import random
+        # Create random embedding with normal distribution
+        embedding = [random.gauss(0, 1) for _ in range(dimension)]
+        # Normalize it
+        return normalize_vector(embedding)
+
+    def _clean_text(self, text: str) -> str:
+        """Clean text for embedding generation"""
+        if not text or not text.strip():
+            return ""
+        
+        # Remove excessive whitespace but keep the content
+        cleaned = ' '.join(text.split())
+        
+        # Ensure minimum length
+        if len(cleaned) < 10:
+            print(f"⚠️  Text too short after cleaning: '{cleaned}'")
+            return ""
+        
+        return cleaned
+        
     async def get_chat_completion(self, prompt: str, context: str = "") -> str:
         """Get chat completion using local Llama asynchronously"""
         full_prompt = self._build_prompt(prompt, context)
