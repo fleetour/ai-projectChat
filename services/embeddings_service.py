@@ -4,7 +4,8 @@ from qdrant_client import QdrantClient
 import requests
 from dotenv import load_dotenv
 from mistralai import Mistral
-from typing import List
+from typing import List, Optional
+from config import FILES_DIR
 from services.local_llma_service import local_llama
 from datetime import datetime
 import uuid 
@@ -47,21 +48,6 @@ except ImportError:
 #     return [item["embedding"] for item in data["data"]]
 
 
-
-def extract_text_from_file(file_path: str) -> str:
-    """Extract text from .docx, .pdf, or .txt files."""
-    ext = file_path.lower()
-    if ext.endswith(".pdf"):
-        from pdfminer.high_level import extract_text
-        return extract_text(file_path)
-    elif ext.endswith(".docx"):
-        doc = Document(file_path)
-        return "\n".join([p.text for p in doc.paragraphs])
-    elif ext.endswith(".txt"):
-        with open(file_path, "r") as f:
-            return f.read()
-    else:
-        raise ValueError(f"Unsupported file type: {file_path}")
     
 # async def get_mistral_chat_completion(prompt: str, model: str = "mistral-medium-latest") -> str:
 #     """
@@ -124,7 +110,9 @@ def save_embeddings_with_path(
     chunks: List[str], 
     embeddings: List[List[float]], 
     target_path: str,
-    target_project: str
+    target_project: str,
+    auto_generated: bool = False,
+    source_template_id: Optional[str] = None
 ):
     """
     Save embeddings to Qdrant with path information
@@ -137,21 +125,39 @@ def save_embeddings_with_path(
         # Create UUID for each point
         point_id = str(uuid.uuid4())
         
+        # Handle empty target_path
+        if target_path and target_path.strip():
+            # If target_path is provided
+            full_file_path = f"{FILES_DIR}/{target_project}/{target_path}/{file_id}_{filename}"
+        else:
+            # If target_path is empty
+            full_file_path = f"{FILES_DIR}/{target_project}/{file_id}_{filename}"
+        
+        # Base payload
+        payload = {
+            "file_id": file_id,
+            "filename": filename,
+            "chunk_index": i,
+            "text": chunk,
+            "total_chunks": len(chunks),
+            "upload_path": target_path,
+            "full_file_path": full_file_path,
+            "upload_time": datetime.now().isoformat(),
+            "original_point_id": f"{file_id}_{i}",
+            "project": target_project
+        }
+        
+        # Add optional parameters if provided
+        if auto_generated:
+            payload["auto_generated"] = True
+        
+        if source_template_id:
+            payload["source_template_id"] = source_template_id
+        
         point = PointStruct(
             id=point_id,
             vector=normalized_embedding,  # ✅ Use NORMALIZED embedding
-            payload={
-                "file_id": file_id,
-                "filename": filename,
-                "chunk_index": i,
-                "text": chunk,
-                "total_chunks": len(chunks),
-                "upload_path": target_path,
-                "full_file_path": f"{target_path}/{file_id}_{filename}" if target_path else f"{file_id}_{filename}",
-                "upload_time": datetime.now().isoformat(),
-                "original_point_id": f"{file_id}_{i}",
-                "project": target_project
-            }
+            payload=payload
         )
         points.append(point)
     
@@ -162,7 +168,16 @@ def save_embeddings_with_path(
         wait=True  # Wait for confirmation
     )
     
-    print(f"✅ Saved {len(points)} NORMALIZED chunks for file {filename} in path {target_path}")
+    # Log the additional parameters if provided
+    additional_info = []
+    if auto_generated:
+        additional_info.append("auto_generated")
+    if source_template_id:
+        additional_info.append(f"source_template: {source_template_id}")
+    
+    info_suffix = f" ({', '.join(additional_info)})" if additional_info else ""
+    
+    print(f"✅ Saved {len(points)} NORMALIZED chunks for file {filename} in path {target_path}{info_suffix}")
     
     # Verify the upload worked
     if hasattr(operation_info, 'status') and operation_info.status == 'completed':

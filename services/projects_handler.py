@@ -1,9 +1,12 @@
 import os
 import logging
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import Any, List, Dict, Optional
 from datetime import datetime
 from pydantic import BaseModel
+
+from config import CUSTOMER_ID
+from db.qdrant_service import get_qdrant_client
 
 logger = logging.getLogger(__name__)
 
@@ -175,3 +178,91 @@ class ProjectsHandler:
 
 # Global instance
 projects_handler = ProjectsHandler()
+
+async def get_project_file(file_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Retrieve file metadata from Qdrant documents collection by file ID
+    """
+    try:
+        qdrant_client = get_qdrant_client()
+        collection_name = f"customer_{CUSTOMER_ID}_documents"
+        
+        # Search for any point with this file_id to get the file metadata
+        points, _ = qdrant_client.scroll(
+            collection_name=collection_name,
+            scroll_filter={
+                "must": [
+                    {
+                        "key": "file_id",
+                        "match": {"value": file_id}
+                    }
+                ]
+            },
+            limit=1,
+            with_payload=True,
+            with_vectors=False
+        )
+        
+        if points and len(points) > 0:
+            payload = points[0].payload
+            
+            # Extract file metadata from the first chunk
+            file_metadata = {
+                "file_id": payload.get("file_id"),
+                "filename": payload.get("filename"),
+                "file_path": payload.get("full_file_path"),  # This might be the path field
+                "project": payload.get("project"),
+                "target_path": payload.get("upload_path"),
+                "total_chunks": payload.get("total_chunks"),
+                "upload_time": payload.get("upload_time"),
+                "auto_generated": payload.get("auto_generated", False),
+                "source_template_id": payload.get("source_template_id")
+            }
+            
+            print(f"✅ Found file metadata for {file_id}: {file_metadata.get('filename')}")
+            return file_metadata
+        else:
+            print(f"❌ No file found in documents collection for file_id: {file_id}")
+            return None
+            
+    except Exception as e:
+        print(f"❌ Error loading file from documents collection for {file_id}: {e}")
+        return None
+    
+async def get_project_file_content(file_id: str) -> Optional[str]:
+    """
+    Retrieve and reconstruct file content from Qdrant documents collection
+    """
+    try:
+        qdrant_client = get_qdrant_client()
+        collection_name = f"customer_{CUSTOMER_ID}_documents"
+        
+        # Get all chunks for this file
+        points, _ = qdrant_client.scroll(
+            collection_name=collection_name,
+            scroll_filter={
+                "must": [
+                    {
+                        "key": "file_id",
+                        "match": {"value": file_id}
+                    }
+                ]
+            },
+            limit=1000,
+            with_payload=True,
+            with_vectors=False
+        )
+        
+        if not points:
+            return None
+        
+        # Sort chunks by chunk_index and reconstruct content
+        sorted_chunks = sorted(points, key=lambda x: x.payload.get('chunk_index', 0))
+        content = ''.join([chunk.payload.get('text', '') for chunk in sorted_chunks])
+        
+        print(f"✅ Reconstructed content for {file_id}: {len(content)} chars")
+        return content
+        
+    except Exception as e:
+        print(f"❌ Error reconstructing content for {file_id}: {e}")
+        return None

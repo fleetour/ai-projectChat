@@ -40,13 +40,15 @@ def normalize_target_path(target_path: str) -> str:
 
 
 
-async def build_file_structure_tree(projectName: str, FILES_DIR: str, collection_name: str) -> List[Dict[str, Any]]:
+async def build_file_structure_tree(project_name: str, FILES_DIR: str, collection_name: str) -> List[Dict[str, Any]]:
     """Build the file structure as a tree for TreeList components with folder support"""
     
     # Get all files from the uploaded_files directory (recursively)
     uploaded_files = []
-    if os.path.exists(FILES_DIR):
-        for root, dirs, files in os.walk(FILES_DIR):
+    full_target_dir = os.path.join(FILES_DIR, project_name)
+
+    if os.path.exists(full_target_dir):
+        for root, dirs, files in os.walk(full_target_dir):
            
             for filename in files:
                 if not filename.startswith('.'):  # Skip hidden files
@@ -67,7 +69,7 @@ async def build_file_structure_tree(projectName: str, FILES_DIR: str, collection
                                 "uploaded_name": filename,
                                 "file_path": file_path,
                                 "relative_path": relative_path,
-                                "project": projectName
+                                "project": project_name
                             })
                             
         print(f"Total files found in filesystem: {len(uploaded_files)}")

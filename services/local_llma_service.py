@@ -134,7 +134,46 @@ class LocalLlamaService:
             return ""
         
         return cleaned
-        
+
+    async def get_chat_completion_with_fullprompt(self, full_prompt: str) -> str:
+        """Get chat completion using local Llama asynchronously"""
+       
+        try:
+            # Use the API instead of command line - much more reliable
+            import requests
+            
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: requests.post(
+                    "http://localhost:11434/api/generate",
+                    json={
+                        "model": self.model,
+                        "prompt": full_prompt,
+                        "stream": False,
+                        "options": {
+                            "temperature": 0.3,
+                            "top_p": 0.9,
+                            "num_predict": 500  # Limit response length
+                        }
+                    },
+                    timeout=60  # 60 second timeout
+                )
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                answer = result.get('response', '').strip()
+                logger.info(f"✅ Llama response received: {len(answer)} characters")
+                return answer
+            else:
+                logger.error(f"API error: {response.status_code} - {response.text}")
+                return "I'm sorry, I encountered an error processing your request."
+                
+        except Exception as e:
+            logger.error(f"Error in chat completion: {e}")
+            return "I'm sorry, I couldn't process your request at the moment."
+            
     async def get_chat_completion(self, prompt: str, context: str = "") -> str:
         """Get chat completion using local Llama asynchronously"""
         full_prompt = self._build_prompt(prompt, context)
@@ -260,4 +299,4 @@ class LocalLlamaService:
     Answer in Markdown format:"""
 
     # Global instance
-local_llama = LocalLlamaService(model="llama3:8b")
+local_llama = LocalLlamaService()
