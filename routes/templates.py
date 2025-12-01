@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from config import CUSTOMER_ID, FILES_DIR
 from db.qdrant_service import get_qdrant_client
 from services.embeddings_service import ensure_cosine_collection, get_embeddings_from_llama, save_embeddings_with_path
-from services.file_service import normalize_target_path
+from services.file_service import build_file_structure_tree, normalize_target_path
 from services.projects_handler import get_project_file, get_project_file_content
 from services.templates_service import TEMPLATES_BASE_DIR, get_template_categories, get_template_metadata, list_all_templates_metadata, list_templates, search_templates, update_template_usage, upload_template_files
 from services.text_generation_functions import create_document_from_llm_content, create_filled_document, fill_template_with_llm
@@ -76,6 +76,8 @@ async def upload_templates(
         # Validate file types
         valid_extensions = {'.docx', '.doc', '.txt', '.md'}
         invalid_files = []
+        if (category.strip() == ""):
+            raise HTTPException(status_code=400, detail="Category is required")
         
         for file in files:
             file_ext = os.path.splitext(file.filename)[1].lower()
@@ -103,6 +105,7 @@ async def get_template_metadata_endpoint(file_id: str):
     if not metadata:
         raise HTTPException(status_code=404, detail="Template metadata not found")
     return metadata
+
 
 @router.get("/metadata")
 async def list_templates_metadata(
@@ -155,6 +158,19 @@ async def list_all_templates(category: str = ""):
     templates = await list_templates(category)
     return {"category": category or "root", "templates": templates, "count": len(templates)}
 
+@router.get("/{category_name}/files")
+async def get_project_files(category_name: str):
+    """Get all files in a specific project"""
+    try:
+        
+        collection_name = f"customer_{CUSTOMER_ID}_templates"
+ 
+        result = await build_file_structure_tree(category_name=category_name, collection_name=collection_name )
+        
+        return result
+    except Exception as e:
+        logger.error(f"Error retrieving files for category '{category_name}': {e}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving project files: {str(e)}")
 
 @router.delete("/{template_path:path}")
 async def delete_template(template_path: str):

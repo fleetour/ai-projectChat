@@ -81,7 +81,7 @@ async def get_project_files(project_name: str):
         
         collection_name = f"customer_{CUSTOMER_ID}_documents"
  
-        result = await build_file_structure_tree(project_name, FILES_DIR, collection_name )
+        result = await build_file_structure_tree(project_name=project_name, collection_name=collection_name )
         
         return result
     except Exception as e:

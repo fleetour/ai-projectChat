@@ -164,7 +164,7 @@ async def save_template_metadata_to_qdrant(
     file_path: str,
     relative_path: str,
     target_path: str,
-    category: str,  # NEW: Add category parameter
+    category: str, 
     file_size: int,
     content_type: str,
     created_time: datetime,
@@ -175,6 +175,7 @@ async def save_template_metadata_to_qdrant(
     """
     try:
         print(f"🔍 Starting metadata save for: {file_id}")
+        print(f"🔍 saving for category : {category}")
         
         # Create comprehensive metadata payload
         metadata_payload = {
@@ -182,6 +183,7 @@ async def save_template_metadata_to_qdrant(
             "original_filename": original_filename,
             "safe_filename": safe_filename,
             "file_path": file_path,
+            "full_file_path": file_path,
             "relative_path": relative_path,
             "target_path": target_path,
             "category": category,  # NEW: Add category to payload
