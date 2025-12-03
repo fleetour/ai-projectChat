@@ -174,3 +174,27 @@ def filter_templates_by_tags(templates: List[Dict[str, Any]], required_tags: Lis
     
     return filtered_templates
     
+def calculate_adaptive_top_k(query: str) -> int:
+    """Determine optimal top_k based on query characteristics."""
+    query_lower = query.lower()
+    
+    # List/Enumerate queries need more context
+    list_keywords = ['list', 'all', 'every', 'each', 'attendees', 'members', 
+                    'participants', 'who are', 'names of', 'show me']
+    
+    # Detail queries need more context
+    detail_keywords = ['describe', 'explain', 'details', 'summary', 'overview',
+                      'what is', 'how does', 'tell me about']
+    
+    # Simple queries need less context
+    simple_keywords = ['yes', 'no', 'when', 'where', 'confirm', 'is there']
+    
+    for keyword in list_keywords:
+        if keyword in query_lower:
+            return 10  # More chunks for list queries
+            
+    for keyword in detail_keywords:
+        if keyword in query_lower:
+            return 8   # Moderate chunks for detail queries
+    
+    return 5  # Default for simple queries

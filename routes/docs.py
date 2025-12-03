@@ -21,7 +21,7 @@ from db.qdrant_service import ensure_collection, get_qdrant_client, search_simil
 from services.local_llma_service import LocalLlamaService
 from routes.schemas import QueryRequest
 from config import FILES_DIR, CUSTOMER_ID, VECTOR_SIZE
-from services.utils import extract_text_from_file, get_collection_name, get_content_type
+from services.utils import calculate_adaptive_top_k, extract_text_from_file, get_collection_name, get_content_type
 
 router = APIRouter(tags=["documents"])
 logger = logging.getLogger(__name__)
@@ -137,10 +137,19 @@ async def query_docs_stream(request: QueryRequest, response: Response):
     async def generate():
         try:
             print(f"🎯 STARTING QUERY STREAM: '{request.query}'")
+
+            adaptive_top_k = calculate_adaptive_top_k(request.query)
+            effective_top_k = max(request.top_k, adaptive_top_k)  # Use whichever is larger
+            
+
             query_emb = get_embeddings_from_llama([request.query])[0]
-            results = search_similar(collection_name, query_emb, request.fileIds, request.top_k)
+            results = search_similar(collection_name, query_emb, request.fileIds, request.project_name, effective_top_k)
+            
+           
             top_chunks = [r.payload["text"] for r in results]
             context = "\n\n".join(top_chunks)
+           
+
             full_answer = ""
             async for chunk in local_llama.get_llama_stream_completion(request.query, context):
                 full_answer += chunk
@@ -151,6 +160,7 @@ async def query_docs_stream(request: QueryRequest, response: Response):
                 formatted_result = {
                     "file_id": str(r.payload.get("file_id", "")),
                     "filename": str(r.payload.get("filename", "")),
+                    "project_name": str(r.payload.get("project_name", "")),
                     "score": round(float(r.score), 6),
                     "text": str(r.payload.get("text", ""))[:500] + "..." if len(r.payload.get("text", "")) > 500 else str(r.payload.get("text", "")),
                 }
@@ -174,6 +184,7 @@ async def query_docs_stream(request: QueryRequest, response: Response):
             "X-Accel-Buffering": "no",
         },
     )
+
 
 
 @router.get("/download/{collection_type}/{file_id}")

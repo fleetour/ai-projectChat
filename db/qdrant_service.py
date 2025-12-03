@@ -1,4 +1,5 @@
 import os
+from typing import List, Optional
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from dotenv import load_dotenv
@@ -106,13 +107,32 @@ def save_embeddings(collection_name: str, file_id: str, filename: str, chunks: l
         logger.error(f"❌ Error saving embeddings to {collection_name}: {e}")
         raise
 
-def search_similar(collection_name: str, query_vector: list, file_ids: list, top_k: int = 5):
+def search_similar(collection_name: str, query_vector: list, file_ids: Optional[List[str]] = None, 
+                   project_name: Optional[str] = None, top_k: int = 5):
     """Search in Qdrant collection."""
     client = get_qdrant_client()
     
+    # Build query filter based on provided parameters
     query_filter = None
-    if file_ids:
+    filter_conditions = []
+    
+    if file_ids and project_name:
+        # If both file_ids and project_name are provided, use OR logic
+        query_filter = {
+            "should": [
+                {"key": "file_id", "match": {"any": file_ids}},
+                {"key": "project_name", "match": {"value": project_name}}
+            ]
+        }
+    elif file_ids:
+        # Only file_ids filter
         query_filter = {"must": [{"key": "file_id", "match": {"any": file_ids}}]}
+    elif project_name:
+        # Only project_name filter
+        query_filter = {"must": [{"key": "project_name", "match": {"value": project_name}}]}
+    # If neither is provided, query_filter remains None (search all)
+    
+    print(f"filter: {query_filter}")
 
     try:
         results = client.search(
@@ -123,10 +143,16 @@ def search_similar(collection_name: str, query_vector: list, file_ids: list, top
             with_payload=True, 
         )
         logger.info(f"✅ Search found {len(results)} results from {collection_name}")
+        
+        # Debug logging
+        if query_filter:
+            logger.debug(f"🔍 Query filter applied: {query_filter}")
+        
         return results
     except Exception as e:
         logger.error(f"❌ Error searching in {collection_name}: {e}")
         raise
+
 
 def delete_file_embeddings(collection_name: str, file_id: str):
     """Delete all embeddings for a specific file."""

@@ -179,8 +179,7 @@ CRITICAL INSTRUCTIONS:
 6. Maintain all original formatting and styling cues
 7. If information is missing, use "TBD" or leave as-is
 8. Do not add any new sections or content
-9. remove any initial texts like 'Here is the completed template'
-10. if you see [TABLE:] means the template contains at this position a table. remove that word [TABLE:] and fill the table 
+9. if you see [TABLE:] means the template contains at this position a table. remove that word [TABLE:] and fill the table 
 
 OUTPUT REQUIREMENTS:
 - Return the complete filled template

@@ -4,9 +4,9 @@ from typing import List, Optional
 
 class QueryRequest(BaseModel):
     query: str
-    fileIds: List[str]
+    fileIds: Optional[List[str]] = None
+    project_name: Optional[str] = None
     top_k: int = 5
-
 
 class UploadRequest(BaseModel):
     target_path: Optional[str] = ""
