@@ -1,5 +1,6 @@
+from typing import Literal
 from fastapi import APIRouter, Form, UploadFile, File, HTTPException, Response
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 import os
 import uuid
 import json
@@ -15,12 +16,12 @@ from services.embeddings_service import (
     normalize_vector,
     save_embeddings_with_path,
 )
-from services.file_service import build_file_structure_tree, normalize_target_path
+from services.file_service import build_file_structure_tree, find_file_path_by_id, normalize_target_path
 from db.qdrant_service import ensure_collection, get_qdrant_client, search_similar, test_exact_vector_search
 from services.local_llma_service import LocalLlamaService
 from routes.schemas import QueryRequest
 from config import FILES_DIR, CUSTOMER_ID, VECTOR_SIZE
-from services.utils import extract_text_from_file
+from services.utils import extract_text_from_file, get_collection_name, get_content_type
 
 router = APIRouter(tags=["documents"])
 logger = logging.getLogger(__name__)
@@ -174,6 +175,162 @@ async def query_docs_stream(request: QueryRequest, response: Response):
         },
     )
 
+
+@router.get("/download/{collection_type}/{file_id}")
+async def download_file(
+    collection_type: Literal["documents", "templates"],
+    file_id: str
+):
+    """
+    Download a file by its file_id from specified collection type
+    
+    Args:
+        collection_type: Either "documents" or "templates" (required)
+        file_id: The ID of the file to download
+    """
+    # Get the full collection name
+    collection_name = get_collection_name(collection_type)
+    
+    print(f"🔍 Searching for file {file_id} in collection: {collection_name}")
+    
+    # Find file path
+    file_path = await find_file_path_by_id(collection_name, file_id)
+    
+    # Get file info
+    filename = os.path.basename(file_path)
+    file_size = os.path.getsize(file_path)
+    
+    # Determine content type
+    content_type = get_content_type(filename)
+    
+    print(f"✅ Found file: {filename} at path: {file_path}")
+    
+    # Return the file
+    return FileResponse(
+        path=file_path,
+        filename=filename,
+        media_type=content_type,
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}",
+            "Content-Length": str(file_size)
+        }
+    )
+
+@router.get("/stream/{collection_type}/{file_id}")
+async def download_file_stream(
+    collection_type: Literal["documents", "templates"],
+    file_id: str
+):
+    """
+    Stream download a file by its file_id
+    Useful for large files
+    """
+    # Get the full collection name
+    collection_name = get_collection_name(collection_type)
+    
+    # Find file path
+    file_path = await find_file_path_by_id(collection_name, file_id)
+    filename = os.path.basename(file_path)
+    
+    # Stream the file
+    def iterfile():
+        with open(file_path, mode="rb") as file_like:
+            yield from file_like
+    
+    content_type = get_content_type(filename)
+    
+    return Response(
+        iterfile(),
+        media_type=content_type,
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}"
+        }
+    )
+
+@router.get("/info/{collection_type}/{file_id}")
+async def get_file_info(
+    collection_type: Literal["documents", "templates"],
+    file_id: str
+):
+    """
+    Get file information without downloading
+    """
+    # Get the full collection name
+    collection_name = get_collection_name(collection_type)
+    
+    try:
+        client = get_qdrant_client()
+        
+        # Search for the file
+        scroll_result = client.scroll(
+            collection_name=collection_name,
+            scroll_filter={
+                "must": [
+                    {"key": "file_id", "match": {"value": file_id}}
+                ]
+            },
+            limit=1,
+            with_payload=True,
+            with_vectors=False
+        )
+        
+        if not scroll_result[0]:
+            raise HTTPException(
+                status_code=404,
+                detail=f"File with ID {file_id} not found in collection {collection_name}"
+            )
+        
+        point = scroll_result[0][0]
+        payload = point.payload
+        
+        # Get file path
+        file_path = await find_file_path_by_id(collection_name, file_id)
+        
+        # Get file stats
+        file_exists = os.path.exists(file_path)
+        file_stats = {}
+        
+        if file_exists:
+            stat_info = os.stat(file_path)
+            import datetime
+            file_stats = {
+                "size": stat_info.st_size,
+                "created": datetime.datetime.fromtimestamp(stat_info.st_ctime).isoformat(),
+                "modified": datetime.datetime.fromtimestamp(stat_info.st_mtime).isoformat(),
+                "exists": True
+            }
+        else:
+            file_stats = {"exists": False}
+        
+        # Extract filename from payload or file path
+        filename = payload.get("filename") or os.path.basename(file_path)
+        
+        return {
+            "file_id": file_id,
+            "filename": filename,
+            "collection_type": collection_type,
+            "collection_name": collection_name,
+            "file_path": file_path,
+            "file_exists": file_exists,
+            "stats": file_stats,
+            "metadata": {
+                "upload_path": payload.get("upload_path"),
+                "project": payload.get("project"),
+                "upload_date": payload.get("upload_time"),
+                "total_chunks": payload.get("total_chunks", 0),
+                "auto_generated": payload.get("auto_generated", False),
+                "source_template_id": payload.get("source_template_id"),
+                "category": payload.get("category")
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error getting file info: {str(e)}"
+        )
 
 @router.get("/health")
 async def health_check():

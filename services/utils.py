@@ -1,9 +1,74 @@
 from docx import Document
 import numpy as np
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal
 import subprocess
 import os
 
+from config import CUSTOMER_ID
+
+def get_content_type(filename: str) -> str:
+    """Determine content type based on file extension"""
+    import mimetypes
+    mimetypes.init()
+    
+    # Common extensions mapping
+    extension_map = {
+        '.pdf': 'application/pdf',
+        '.doc': 'application/msword',
+        '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        '.xls': 'application/vnd.ms-excel',
+        '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        '.ppt': 'application/vnd.ms-powerpoint',
+        '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        '.txt': 'text/plain',
+        '.csv': 'text/csv',
+        '.json': 'application/json',
+        '.xml': 'application/xml',
+        '.zip': 'application/zip',
+        '.rar': 'application/x-rar-compressed',
+        '.7z': 'application/x-7z-compressed',
+        '.tar': 'application/x-tar',
+        '.gz': 'application/gzip',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.png': 'image/png',
+        '.gif': 'image/gif',
+        '.svg': 'image/svg+xml',
+        '.mp3': 'audio/mpeg',
+        '.mp4': 'video/mp4',
+        '.avi': 'video/x-msvideo',
+        '.mov': 'video/quicktime',
+        '.py': 'text/x-python',
+        '.js': 'application/javascript',
+        '.html': 'text/html',
+        '.css': 'text/css'
+    }
+    
+    # Get file extension
+    _, ext = os.path.splitext(filename.lower())
+    
+    # Check our mapping first
+    if ext in extension_map:
+        return extension_map[ext]
+    
+    # Fallback to mimetypes
+    content_type, _ = mimetypes.guess_type(filename)
+    return content_type or "application/octet-stream"
+
+def get_collection_name(collection_type: Literal["documents", "templates"]) -> str:
+    """
+    Get the full collection name based on collection type
+    
+    Args:
+        collection_type: Either "documents" or "templates"
+        
+    Returns:
+        Full collection name with customer prefix
+    """
+    if collection_type not in ["documents", "templates"]:
+        raise ValueError(f"Invalid collection type: {collection_type}. Must be 'documents' or 'templates'")
+    
+    return f"customer_{CUSTOMER_ID}_{collection_type}"
 
 def normalize_vector(vector: List[float]) -> List[float]:
     """Normalize vector for cosine similarity"""
@@ -75,7 +140,7 @@ def extract_table_text(table) -> str:
             table_lines.append(" | ".join(row_cells))
     
     if table_lines:
-        return "TABLE:\n" + "\n".join(table_lines)
+        return "[TABLE:]\n" + "\n".join(table_lines)
     return ""
 
 
