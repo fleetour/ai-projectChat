@@ -1,4 +1,5 @@
 import os
+import re
 from typing import List, Dict, Any, Optional
 
 from fastapi import HTTPException
@@ -397,4 +398,149 @@ def flatten_tree_structure_simple(tree_nodes: List[Dict[str, Any]]) -> List[Dict
     return flat_list
 
 
+def intelligent_chunking_simple(
+    text: str,
+    max_chunk_size: int = 1500,
+    overlap: int = 200
+) -> List[str]:
+    """
+    Einfache intelligente Chunking-Strategie.
+    Schneidet nicht blind bei 500 Zeichen, sondern an Satzgrenzen.
+    """
+    import re
+    
+    # Entferne überflüssige Leerzeichen
+    text = text.strip()
+    if not text:
+        return []
+    
+    # 1. Zuerst nach großen Abschnitten trennen (doppelte Zeilenumbrüche)
+    sections = re.split(r'\n\s*\n', text)
+    sections = [s.strip() for s in sections if s.strip()]
+    
+    chunks = []
+    
+    for section in sections:
+        # Wenn Abschnitt schon klein genug
+        if len(section) <= max_chunk_size:
+            chunks.append(section)
+            continue
+        
+        # 2. Nach Sätzen aufteilen (deutsche Satzenden)
+        # Verbesserte Satzerkennung für Deutsch
+        sentences = re.split(r'(?<=[.!?])\s+(?=[A-ZÄÖÜ])', section)
+        
+        current_chunk = ""
+        for sentence in sentences:
+            # Wenn Satz alleine schon zu groß ist
+            if len(sentence) > max_chunk_size:
+                # Satz weiter aufteilen
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                    current_chunk = ""
+                
+                # Sehr lange Sätze nach Kommas aufteilen
+                sub_parts = re.split(r',\s+', sentence)
+                sub_current = ""
+                for part in sub_parts:
+                    if len(sub_current) + len(part) > max_chunk_size and sub_current:
+                        chunks.append(sub_current.strip())
+                        sub_current = part
+                    else:
+                        if sub_current:
+                            sub_current += ", " + part
+                        else:
+                            sub_current = part
+                
+                if sub_current:
+                    current_chunk = sub_current + " "
+                continue
+            
+            # Normale Verarbeitung
+            if len(current_chunk) + len(sentence) > max_chunk_size:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                    
+                    # Overlap für Kontext
+                    if overlap > 0:
+                        # Letzte paar Sätze für Overlap behalten
+                        overlap_text = current_chunk
+                        # Versuche, letzte 2 Sätze zu finden
+                        last_sentences = re.findall(r'[^.!?]+[.!?]', overlap_text)
+                        if len(last_sentences) >= 2:
+                            current_chunk = ' '.join(last_sentences[-2:]) + ' '
+                        else:
+                            current_chunk = overlap_text[-overlap:] if len(overlap_text) > overlap else overlap_text
+                    else:
+                        current_chunk = ""
+            
+            current_chunk += sentence + " "
+        
+        # Rest des Abschnitts
+        if current_chunk.strip():
+            chunks.append(current_chunk.strip())
+    
+    # 3. Entferne sehr kleine Chunks und füge ggf. zusammen
+    final_chunks = []
+    current = ""
+    
+    for chunk in chunks:
+        if len(chunk) < 50:  # Zu klein
+            if current:
+                current += " " + chunk
+            else:
+                current = chunk
+        elif len(current) + len(chunk) < max_chunk_size and current:
+            current += "\n\n" + chunk
+        else:
+            if current:
+                final_chunks.append(current.strip())
+            current = chunk
+    
+    if current.strip():
+        final_chunks.append(current.strip())
+    
+    # Sicherstellen, dass wir mindestens einen Chunk haben
+    if not final_chunks and text:
+        # Fallback: Teile in gleich große Stücke, aber an Satzgrenzen
+        final_chunks = chunk_fallback(text, max_chunk_size)
+    
+    logger.debug(f"Created {len(final_chunks)} chunks from {len(sections)} sections")
+    return final_chunks
+
+
+def chunk_fallback(text: str, max_chunk_size: int) -> List[str]:
+    """Fallback-Chunking wenn intelligentes scheitert."""
+    import re
+    
+    chunks = []
+    current = ""
+    
+    # Versuche, nach Sätzen zu teilen
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    
+    for sentence in sentences:
+        if len(current) + len(sentence) > max_chunk_size and current:
+            chunks.append(current.strip())
+            current = sentence
+        else:
+            if current:
+                current += " " + sentence
+            else:
+                current = sentence
+    
+    if current.strip():
+        chunks.append(current.strip())
+    
+    # Wenn immer noch zu große Chunks, teile hart
+    final_chunks = []
+    for chunk in chunks:
+        if len(chunk) > max_chunk_size:
+            # Teile in gleich große Stücke
+            for i in range(0, len(chunk), max_chunk_size):
+                final_chunks.append(chunk[i:i + max_chunk_size].strip())
+        else:
+            final_chunks.append(chunk)
+    
+    return final_chunks
 

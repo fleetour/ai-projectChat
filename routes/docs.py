@@ -16,7 +16,7 @@ from services.embeddings_service import (
     normalize_vector,
     save_embeddings_with_path,
 )
-from services.file_service import build_file_structure_tree, find_file_path_by_id, normalize_target_path
+from services.file_service import build_file_structure_tree, find_file_path_by_id, intelligent_chunking_simple, normalize_target_path
 from db.qdrant_service import ensure_collection, get_qdrant_client, search_similar, test_exact_vector_search
 from services.local_llma_service import LocalLlamaService
 from routes.schemas import QueryRequest
@@ -35,8 +35,11 @@ async def upload_files(
     target_path: str = Form(""),
     files: list[UploadFile] = File(...),
 ):
+    """Verbesserte Datei-Upload-Funktion mit intelligentem Chunking."""
+    
     collection_name = f"customer_{CUSTOMER_ID}_documents"
     ensure_collection(collection_name, vector_size=VECTOR_SIZE)
+    
     if (not target_project) or target_project.strip() == "":
         raise HTTPException(status_code=400, detail="Target project must be specified")
 
@@ -48,45 +51,80 @@ async def upload_files(
     qdrant_client = get_qdrant_client()
 
     for file in files:
+        file_id = str(uuid.uuid4())
+        file_path = None
+        
         try:
-            file_id = str(uuid.uuid4())
+            # 1. Datei speichern
             file_path = os.path.join(full_target_dir, f"{file_id}_{file.filename}")
             relative_file_path = os.path.join(target_path, f"{file_id}_{file.filename}")
+            
             with open(file_path, "wb") as f:
                 content = await file.read()
                 f.write(content)
 
+            # 2. Text extrahieren
             text = extract_text_from_file(file_path)
+            
             if not text or len(text.strip()) < 10:
                 errors.append(f"File {file.filename}: No readable text content found")
                 os.remove(file_path)
                 continue
 
-            chunks = [text[i:i + 500] for i in range(0, len(text), 500)]
-            chunks = [chunk for chunk in chunks if len(chunk.strip()) > 10]
+            # 3. INTELLIGENTES CHUNKING (statt fix 500 Zeichen)
+            chunks = intelligent_chunking_simple(
+                text=text,
+                max_chunk_size=1500,
+                overlap=200
+            )
+            
             if not chunks:
                 errors.append(f"File {file.filename}: No valid text chunks created")
                 os.remove(file_path)
                 continue
 
-            logger.info(f"Processing {file.filename}: {len(chunks)} chunks, path: {target_path}")
-            embeddings = get_embeddings_from_llama(chunks)
-            if not embeddings or len(embeddings) != len(chunks):
-                errors.append(f"File {file.filename}: Embedding count mismatch")
-                os.remove(file_path)
-                continue
+            logger.info(f"✅ Processing {file.filename}: {len(chunks)} chunks (vorher: {len(text) // 500})")
 
-            ensure_cosine_collection(qdrant_client, collection_name, vector_size=4096)
+            # 4. Embeddings berechnen (in Batches für große Dateien)
+            all_embeddings = []
+            batch_size = 10  # Kleinere Batch-Größe für Stabilität
+            
+            for i in range(0, len(chunks), batch_size):
+                batch_chunks = chunks[i:i + batch_size]
+                batch_embeddings = get_embeddings_from_llama(batch_chunks)
+                
+                if not batch_embeddings:
+                    raise Exception(f"Embedding batch {i//batch_size + 1} returned None")
+                
+                if len(batch_embeddings) != len(batch_chunks):
+                    logger.warning(f"Embedding mismatch: expected {len(batch_chunks)}, got {len(batch_embeddings)}")
+                    # Nimm so viele wie möglich
+                    all_embeddings.extend(batch_embeddings[:len(batch_chunks)])
+                else:
+                    all_embeddings.extend(batch_embeddings)
+                
+                logger.debug(f"  Processed embedding batch {i//batch_size + 1}")
 
+            # 5. In Qdrant speichern (mit deiner Funktion)
+            if len(all_embeddings) != len(chunks):
+                logger.warning(f"Final embedding mismatch for {file.filename}: chunks={len(chunks)}, embeddings={len(all_embeddings)}")
+                # Anpassen: Nimm nur so viele Chunks wie Embeddings vorhanden
+                min_length = min(len(chunks), len(all_embeddings))
+                chunks = chunks[:min_length]
+                all_embeddings = all_embeddings[:min_length]
+
+            # DEINE FUNKTION VERWENDEN
             save_embeddings_with_path(
                 qdrant_client=qdrant_client,
                 collection_name=collection_name,
                 file_id=file_id,
                 filename=file.filename,
                 chunks=chunks,
-                embeddings=embeddings,
+                embeddings=all_embeddings,
                 target_path=target_path,
                 target_project=target_project,
+                auto_generated=False,  # Kannst du anpassen
+                source_template_id=None  # Kannst du anpassen
             )
 
             upload_results.append({
@@ -98,14 +136,22 @@ async def upload_files(
             })
 
         except Exception as e:
-            errors.append(f"File {file.filename}: Processing failed - {str(e)}")
-            logger.error(f"Error processing {file.filename}: {e}")
-            if 'file_path' in locals() and os.path.exists(file_path):
+            error_msg = f"File {file.filename}: Processing failed - {str(e)}"
+            errors.append(error_msg)
+            logger.error(f"❌ Error processing {file.filename}: {e}", exc_info=True)
+            
+            if file_path and os.path.exists(file_path):
                 os.remove(file_path)
 
-    response_content = {"uploaded": upload_results, "targetPath": target_path, "fullTargetDir": full_target_dir}
+    response_content = {
+        "uploaded": upload_results, 
+        "targetPath": target_path, 
+        "fullTargetDir": full_target_dir
+    }
+    
     if errors:
         response_content["errors"] = errors
+        
     return JSONResponse(content=response_content)
 
 
