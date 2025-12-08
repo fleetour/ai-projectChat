@@ -6,16 +6,17 @@ from dotenv import load_dotenv
 from mistralai import Mistral
 from typing import List, Optional
 from config import FILES_DIR
-from services.local_llma_service import local_llama
 from datetime import datetime
 import uuid 
 from qdrant_client.models import PointStruct
 import numpy as np
-
+import logging
+from db.qdrant_service import get_qdrant_client
+from services.local_llma_service import LocalLlamaService
 from services.utils import normalize_vector
 
 load_dotenv()
-
+logger = logging.getLogger(__name__)
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 MISTRAL_API_URL = "https://api.mistral.ai/v1/embeddings"
 
@@ -67,12 +68,19 @@ except ImportError:
 #     except Exception as e:
 #         raise Exception(f"Failed to get Mistral chat completion: {str(e)}")
     
-def get_embeddings_from_llama(texts: List[str]) -> List[List[float]]:
+def get_embeddings_from_llama(texts: List[str], model: str) -> List[List[float]]:
     """Get embeddings using local Llama"""
+
+    if not model.strip():
+        raise Exception(f"Model must be defined.")
+    local_llama = LocalLlamaService(model=model)
     return local_llama.get_embeddings(texts)
 
-async def get_llama_chat_completion(prompt: str) -> str:
+async def get_llama_chat_completion(prompt: str, model: str) -> str:
     """Get chat completion using local Llama"""
+    if not model.strip():
+        raise Exception(f"Model must be defined.")
+    local_llama = LocalLlamaService(model=model)
     return await local_llama.get_chat_completion(prompt)
 
 def ensure_cosine_collection(qdrant_client: QdrantClient, collection_name: str, vector_size: int = 4096):
@@ -103,7 +111,6 @@ def ensure_cosine_collection(qdrant_client: QdrantClient, collection_name: str, 
         print("✅ Created new collection with Cosine distance")
 
 def save_embeddings_with_path(
-    qdrant_client: QdrantClient,
     collection_name: str, 
     file_id: str, 
     filename: str, 
@@ -112,12 +119,32 @@ def save_embeddings_with_path(
     target_path: str,
     target_project: str,
     auto_generated: bool = False,
-    source_template_id: Optional[str] = None
+    source_template_id: Optional[str] = None,
+    # Azure Blob specific parameters
+    blob_metadata: Optional[dict] = None,
+    storage_type: str = "azure_blob"
 ):
     """
-    Save embeddings to Qdrant with path information
+    Save embeddings to Qdrant with path information for Azure Blob Storage
+    
+    Args:
+        qdrant_client: Qdrant client instance
+        collection_name: Name of the Qdrant collection
+        file_id: Unique file identifier
+        filename: Original filename
+        chunks: List of text chunks
+        embeddings: List of embedding vectors
+        target_path: Path within the project
+        target_project: Project name
+        auto_generated: Whether the content was auto-generated
+        source_template_id: ID of source template (if any)
+        blob_metadata: Azure Blob metadata (from upload_file result)
+        storage_type: Storage type ("azure_blob", "local", etc.)
     """
+
+    qdrant_client = get_qdrant_client()
     points = []
+    
     for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
         # Normalize the embedding for cosine similarity
         normalized_embedding = normalize_vector(embedding)
@@ -125,15 +152,24 @@ def save_embeddings_with_path(
         # Create UUID for each point
         point_id = str(uuid.uuid4())
         
-        # Handle empty target_path
-        if target_path and target_path.strip():
-            # If target_path is provided
-            full_file_path = f"{FILES_DIR}/{target_project}/{target_path}/{file_id}_{filename}"
+        # Build full file path based on storage type
+        if storage_type == "azure_blob" and blob_metadata:
+            # Use Azure Blob path from metadata
+            full_file_path = blob_metadata.get("full_file_path", "")
+            blob_name = blob_metadata.get("blob_name", "")
+            blob_url = blob_metadata.get("blob_url", "")
+            container = blob_metadata.get("container", "")
         else:
-            # If target_path is empty
-            full_file_path = f"{FILES_DIR}/{target_project}/{file_id}_{filename}"
+            # Fallback to local path (for backward compatibility)
+            if target_path and target_path.strip():
+                full_file_path = f"{FILES_DIR}/{target_project}/{target_path}/{file_id}_{filename}"
+            else:
+                full_file_path = f"{FILES_DIR}/{target_project}/{file_id}_{filename}"
+            blob_name = ""
+            blob_url = ""
+            container = ""
         
-        # Base payload
+        # Base payload with all metadata
         payload = {
             "file_id": file_id,
             "filename": filename,
@@ -144,8 +180,25 @@ def save_embeddings_with_path(
             "full_file_path": full_file_path,
             "upload_time": datetime.now().isoformat(),
             "original_point_id": f"{file_id}_{i}",
-            "project": target_project
+            "project": target_project,
+            "storage_type": storage_type,
+            
+            # Azure Blob specific fields
+            "blob_name": blob_name,
+            "blob_url": blob_url,
+            "container": container,
+            "file_size": blob_metadata.get("size") if blob_metadata else None,
+            "content_type": blob_metadata.get("content_type") if blob_metadata else None,
         }
+        
+        # Add blob metadata if available
+        if blob_metadata:
+            payload.update({
+                "azure_metadata": {
+                    k: v for k, v in blob_metadata.items() 
+                    if k not in ["file_id", "filename", "full_file_path", "size", "content_type"]
+                }
+            })
         
         # Add optional parameters if provided
         if auto_generated:
@@ -154,33 +207,51 @@ def save_embeddings_with_path(
         if source_template_id:
             payload["source_template_id"] = source_template_id
         
+        # Add base folder information if available
+        if blob_metadata and "base_folder" in blob_metadata:
+            payload["base_folder"] = blob_metadata["base_folder"]
+        
         point = PointStruct(
             id=point_id,
-            vector=normalized_embedding,  # ✅ Use NORMALIZED embedding
+            vector=normalized_embedding,
             payload=payload
         )
         points.append(point)
     
     # Batch upload to Qdrant
-    operation_info = qdrant_client.upsert(
-        collection_name=collection_name,
-        points=points,
-        wait=True  # Wait for confirmation
-    )
-    
-    # Log the additional parameters if provided
-    additional_info = []
-    if auto_generated:
-        additional_info.append("auto_generated")
-    if source_template_id:
-        additional_info.append(f"source_template: {source_template_id}")
-    
-    info_suffix = f" ({', '.join(additional_info)})" if additional_info else ""
-    
-    print(f"✅ Saved {len(points)} NORMALIZED chunks for file {filename} in path {target_path}{info_suffix}")
-    
-    # Verify the upload worked
-    if hasattr(operation_info, 'status') and operation_info.status == 'completed':
-        print(f"✅ Upload confirmed for {filename}")
-    else:
-        print(f"⚠️  Upload status uncertain for {filename}")
+    try:
+        operation_info = qdrant_client.upsert(
+            collection_name=collection_name,
+            points=points,
+            wait=True  # Wait for confirmation
+        )
+        
+        # Log the additional parameters if provided
+        additional_info = []
+        if auto_generated:
+            additional_info.append("auto_generated")
+        if source_template_id:
+            additional_info.append(f"source_template: {source_template_id}")
+        
+        info_suffix = f" ({', '.join(additional_info)})" if additional_info else ""
+        
+        # Log based on storage type
+        if storage_type == "azure_blob":
+            logger.info(f"✅ Saved {len(points)} chunks for file {filename} to Azure Blob")
+            if blob_metadata and "blob_name" in blob_metadata:
+                logger.info(f"   Blob path: {blob_metadata['blob_name']}")
+                logger.info(f"   Container: {blob_metadata.get('container', 'N/A')}")
+        else:
+            logger.info(f"✅ Saved {len(points)} chunks for file {filename} in path {target_path}{info_suffix}")
+        
+        # Verify the upload worked
+        if hasattr(operation_info, 'status') and operation_info.status == 'completed':
+            logger.info(f"✅ Upload confirmed for {filename}")
+        else:
+            logger.warning(f"⚠️  Upload status uncertain for {filename}")
+            
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to save embeddings for {filename}: {e}")
+        return False

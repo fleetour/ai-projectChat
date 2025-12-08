@@ -1,8 +1,12 @@
 from docx import Document
 import numpy as np
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List, Literal, Optional
 import subprocess
 import os
+import logging
+import tempfile
+
+logger = logging.getLogger(__name__)
 
 from config import CUSTOMER_ID
 
@@ -96,6 +100,62 @@ def validate_file_type(filename: str) -> None:
             f"Supported types: {', '.join(SUPPORTED_EXTENSIONS)}. "
             f"Please convert to a supported format."
         )
+
+def extract_text_from_bytes(content: bytes, filename: str, original_file_path: Optional[str] = None) -> str:
+    """
+    Extract text from file bytes by saving to temp file and using existing extract_text_from_file.
+    
+    Args:
+        content: File content as bytes
+        filename: Original filename (for extension detection)
+        original_file_path: Optional original path for logging
+    
+    Returns:
+        str: Extracted text
+    """
+    temp_file_path = None
+    
+    try:
+        # Get file extension from filename
+        _, file_ext = os.path.splitext(filename.lower())
+        
+        # Create a temporary file with the correct extension
+        with tempfile.NamedTemporaryFile(
+            suffix=file_ext, 
+            delete=False,
+            prefix="extract_"
+        ) as tmp:
+            # Write content to temp file
+            tmp.write(content)
+            temp_file_path = tmp.name
+        
+        # Use the existing extract_text_from_file function
+        text = extract_text_from_file(temp_file_path)
+        
+        return text
+        
+    except Exception as e:
+        error_context = f" from {original_file_path}" if original_file_path else ""
+        logger.error(f"Error extracting text from {filename}{error_context}: {e}")
+        
+        # Try fallback for common text files
+        if file_ext in ['.txt', '.md', '.csv', '.json', '.xml', '.html', '.htm']:
+            try:
+                return content.decode('utf-8')
+            except UnicodeDecodeError:
+                try:
+                    return content.decode('latin-1')
+                except:
+                    return ""
+        return ""
+    
+    finally:
+        # Always clean up temp file
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.unlink(temp_file_path)
+            except Exception as e:
+                logger.warning(f"Failed to delete temp file {temp_file_path}: {e}")
 
 def extract_text_from_file(file_path: str) -> str:
     """Extract text from various file types including tables in Word documents"""

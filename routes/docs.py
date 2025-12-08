@@ -1,3 +1,4 @@
+import io
 from typing import Literal
 from fastapi import APIRouter, Form, UploadFile, File, HTTPException, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -8,7 +9,9 @@ import logging
 import numpy as np
 
 from qdrant_client import models
+import urllib
 
+from services.azure_blob_service import get_blob_service
 from services.embeddings_service import (
     ensure_cosine_collection,
     get_embeddings_from_llama,
@@ -16,17 +19,17 @@ from services.embeddings_service import (
     normalize_vector,
     save_embeddings_with_path,
 )
-from services.file_service import build_file_structure_tree, find_file_path_by_id, intelligent_chunking_simple, normalize_target_path
+from services.file_service import build_file_structure_tree, find_file_path_by_id, find_file_payload, intelligent_chunking_simple, normalize_target_path
 from db.qdrant_service import ensure_collection, get_qdrant_client, search_similar, test_exact_vector_search
 from services.local_llma_service import LocalLlamaService
 from routes.schemas import QueryRequest
 from config import FILES_DIR, CUSTOMER_ID, VECTOR_SIZE
-from services.utils import calculate_adaptive_top_k, extract_text_from_file, get_collection_name, get_content_type
+from services.utils import calculate_adaptive_top_k, extract_text_from_bytes, extract_text_from_file, get_collection_name, get_content_type
 
 router = APIRouter(tags=["documents"])
 logger = logging.getLogger(__name__)
 
-local_llama = LocalLlamaService(model="llama3:8b")
+
 
 
 @router.post("/upload")
@@ -35,7 +38,7 @@ async def upload_files(
     target_path: str = Form(""),
     files: list[UploadFile] = File(...),
 ):
-    """Verbesserte Datei-Upload-Funktion mit intelligentem Chunking."""
+    """Verbesserte Datei-Upload-Funktion mit Azure Blob Storage."""
     
     collection_name = f"customer_{CUSTOMER_ID}_documents"
     ensure_collection(collection_name, vector_size=VECTOR_SIZE)
@@ -43,35 +46,42 @@ async def upload_files(
     if (not target_project) or target_project.strip() == "":
         raise HTTPException(status_code=400, detail="Target project must be specified")
 
+    # Get blob service
+    blob_service = get_blob_service()
+    
     upload_results = []
     errors = []
     target_path = normalize_target_path(target_path)
-    full_target_dir = os.path.join(FILES_DIR, target_project, target_path)
-    os.makedirs(full_target_dir, exist_ok=True)
-    qdrant_client = get_qdrant_client()
+ 
 
     for file in files:
         file_id = str(uuid.uuid4())
-        file_path = None
         
         try:
-            # 1. Datei speichern
-            file_path = os.path.join(full_target_dir, f"{file_id}_{file.filename}")
-            relative_file_path = os.path.join(target_path, f"{file_id}_{file.filename}")
+            # 1. Read file content
+            content = await file.read()
             
-            with open(file_path, "wb") as f:
-                content = await file.read()
-                f.write(content)
-
-            # 2. Text extrahieren
-            text = extract_text_from_file(file_path)
+            # 2. Upload to Azure Blob using service
+            upload_result = blob_service.upload_file(
+                customer_id=str(CUSTOMER_ID),
+                file_content=content,
+                filename=file.filename,
+                target_project=target_project,
+                target_path=target_path,
+                content_type=file.content_type,
+                base_folder=FILES_DIR
+            )
+            
+            # 3. Extract text from content
+            text = extract_text_from_bytes(content, filename=file.filename)
             
             if not text or len(text.strip()) < 10:
                 errors.append(f"File {file.filename}: No readable text content found")
-                os.remove(file_path)
+                # Delete from Azure
+                blob_service.delete_file(CUSTOMER_ID, upload_result["blob_name"])
                 continue
 
-            # 3. INTELLIGENTES CHUNKING (statt fix 500 Zeichen)
+            # 4. INTELLIGENTES CHUNKING
             chunks = intelligent_chunking_simple(
                 text=text,
                 max_chunk_size=1500,
@@ -80,73 +90,73 @@ async def upload_files(
             
             if not chunks:
                 errors.append(f"File {file.filename}: No valid text chunks created")
-                os.remove(file_path)
+                blob_service.delete_file(CUSTOMER_ID, upload_result["blob_name"])
                 continue
 
-            logger.info(f"✅ Processing {file.filename}: {len(chunks)} chunks (vorher: {len(text) // 500})")
+            logger.info(f"✅ Processing {file.filename}: {len(chunks)} chunks")
 
-            # 4. Embeddings berechnen (in Batches für große Dateien)
+            # 5. Embeddings berechnen
             all_embeddings = []
-            batch_size = 10  # Kleinere Batch-Größe für Stabilität
+            batch_size = 10
             
             for i in range(0, len(chunks), batch_size):
                 batch_chunks = chunks[i:i + batch_size]
-                batch_embeddings = get_embeddings_from_llama(batch_chunks)
+                batch_embeddings = get_embeddings_from_llama(batch_chunks, model="mistral:7b")
                 
                 if not batch_embeddings:
                     raise Exception(f"Embedding batch {i//batch_size + 1} returned None")
                 
                 if len(batch_embeddings) != len(batch_chunks):
                     logger.warning(f"Embedding mismatch: expected {len(batch_chunks)}, got {len(batch_embeddings)}")
-                    # Nimm so viele wie möglich
                     all_embeddings.extend(batch_embeddings[:len(batch_chunks)])
                 else:
                     all_embeddings.extend(batch_embeddings)
                 
                 logger.debug(f"  Processed embedding batch {i//batch_size + 1}")
 
-            # 5. In Qdrant speichern (mit deiner Funktion)
+            # 6. Adjust chunks if embedding mismatch
             if len(all_embeddings) != len(chunks):
                 logger.warning(f"Final embedding mismatch for {file.filename}: chunks={len(chunks)}, embeddings={len(all_embeddings)}")
-                # Anpassen: Nimm nur so viele Chunks wie Embeddings vorhanden
                 min_length = min(len(chunks), len(all_embeddings))
                 chunks = chunks[:min_length]
                 all_embeddings = all_embeddings[:min_length]
 
-            # DEINE FUNKTION VERWENDEN
+            # 7. Save to Qdrant with Azure Blob metadata
             save_embeddings_with_path(
-                qdrant_client=qdrant_client,
                 collection_name=collection_name,
-                file_id=file_id,
+                file_id=upload_result["file_id"],
                 filename=file.filename,
                 chunks=chunks,
                 embeddings=all_embeddings,
                 target_path=target_path,
                 target_project=target_project,
-                auto_generated=False,  # Kannst du anpassen
-                source_template_id=None  # Kannst du anpassen
+                auto_generated=False,
+                source_template_id=None,
+                # Pass blob_metadata as a dictionary
+                blob_metadata=upload_result
             )
 
             upload_results.append({
-                "fileId": file_id,
+                "fileId": upload_result["file_id"],
                 "filename": file.filename,
                 "chunks": len(chunks),
                 "path": target_path,
-                "fullPath": relative_file_path,
+                "project": target_project,
+                "blobUrl": upload_result["blob_url"],
+                "container": upload_result["container"],
+                "blobPath": upload_result["blob_name"]
             })
 
         except Exception as e:
             error_msg = f"File {file.filename}: Processing failed - {str(e)}"
             errors.append(error_msg)
             logger.error(f"❌ Error processing {file.filename}: {e}", exc_info=True)
-            
-            if file_path and os.path.exists(file_path):
-                os.remove(file_path)
 
     response_content = {
         "uploaded": upload_results, 
         "targetPath": target_path, 
-        "fullTargetDir": full_target_dir
+        "targetProject": target_project,
+        "container": f"customer_{CUSTOMER_ID}"
     }
     
     if errors:
@@ -159,13 +169,13 @@ async def upload_files(
 async def query_docs(request: QueryRequest):
     collection_name = f"customer_{CUSTOMER_ID}_documents"
     try:
-        query_emb = get_embeddings_from_llama([request.query])[0]
+        query_emb = get_embeddings_from_llama([request.query], request.model)[0]
         results = search_similar(collection_name, query_emb, request.fileIds, request.top_k)
         top_chunks = [r.payload["text"] for r in results]
         context = "\n\n".join(top_chunks)
         prompt = f"Answer the question based on the following text:\n\n{context}\n\nQuestion: {request.query}\nAnswer:"
         logger.info(f"Query: {request.query}, Found {len(results)} relevant chunks")
-        answer = await get_llama_chat_completion(prompt)
+        answer = await get_llama_chat_completion(prompt, request.model)
         formatted_results = [
             {"file_id": r.payload["file_id"], "filename": r.payload["filename"], "score": r.score, "text": r.payload["text"]}
             for r in results
@@ -188,14 +198,14 @@ async def query_docs_stream(request: QueryRequest, response: Response):
             effective_top_k = max(request.top_k, adaptive_top_k)  # Use whichever is larger
             
 
-            query_emb = get_embeddings_from_llama([request.query])[0]
+            query_emb = get_embeddings_from_llama([request.query], request.model)[0]
             results = search_similar(collection_name, query_emb, request.fileIds, request.project_name, effective_top_k)
             
            
             top_chunks = [r.payload["text"] for r in results]
             context = "\n\n".join(top_chunks)
            
-
+            local_llama = LocalLlamaService(model=request.model)
             full_answer = ""
             async for chunk in local_llama.get_llama_stream_completion(request.query, context):
                 full_answer += chunk
@@ -232,6 +242,101 @@ async def query_docs_stream(request: QueryRequest, response: Response):
     )
 
 
+
+@router.get("/download/{collection_type}/{file_id}")
+async def download_file(
+    collection_type: Literal["documents", "templates"],
+    file_id: str
+):
+    """
+    Download a file by its file_id from Azure Blob Storage
+    """
+    try:
+        # Get the full collection name
+        collection_name = get_collection_name(collection_type)
+        
+        print(f"🔍 Searching for file {file_id} in collection: {collection_name}")
+        
+        payload = await find_file_payload(collection_name, file_id)
+        
+        if not payload:
+            raise HTTPException(
+                status_code=404,
+                detail=f"File {file_id} not found in collection {collection_type}"
+            )
+        
+        # 1. Find the full_file_path from Qdrant
+        full_file_path = payload.get("full_file_path") or payload.get("full_path") or payload.get("blob_name")
+        
+        if not full_file_path:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No blob path found for file {file_id}"
+            )
+        
+        # The full_file_path IS the blob name in Azure!
+        blob_name = full_file_path
+        
+        print(f"✅ Found blob path: {blob_name}")
+        
+        # 2. Extract original filename for download (with fallback)
+        original_filename = payload.get("filename")
+        
+        # 3. Get blob service
+        blob_service = get_blob_service()
+        
+        # 4. Download file from Azure Blob
+        try:
+            file_content, blob_info = blob_service.download_file(
+                customer_id=CUSTOMER_ID,
+                blob_name=blob_name
+            )
+            
+            # Use the original filename for download with safe fallback
+            download_filename = original_filename or blob_info.get("filename") or f"file_{file_id}"
+            
+            # FIX: Ensure download_filename is a string before quoting
+            if isinstance(download_filename, bytes):
+                download_filename = download_filename.decode('utf-8', errors='ignore')
+            
+            # FIX: Only quote if we have a valid string
+            if download_filename and isinstance(download_filename, str):
+                safe_filename = urllib.parse.quote(download_filename)
+            else:
+                safe_filename = f"file_{file_id}"
+            
+            print(f"✅ Downloaded: {download_filename}, size: {len(file_content)} bytes")
+            
+            # 5. Return file as StreamingResponse
+            return StreamingResponse(
+                content=io.BytesIO(file_content),
+                media_type=blob_info.get("content_type", "application/octet-stream"),
+                headers={
+                    "Content-Disposition": f"attachment; filename=\"{safe_filename}\"",
+                    "Content-Length": str(len(file_content)),
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Pragma": "no-cache",
+                    "Expires": "0",
+                    "X-File-Id": file_id,
+                    "X-Blob-Path": blob_name
+                }
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Error downloading blob {blob_name}: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to download file from storage: {str(e)}"
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error downloading file {file_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to download file: {str(e)}"
+        )
 
 @router.get("/download/{collection_type}/{file_id}")
 async def download_file(
@@ -457,7 +562,7 @@ async def test_search_only(request: QueryRequest):
     collection_name = f"customer_{CUSTOMER_ID}_documents"
     try:
         print(f"🧪 TEST SEARCH: '{request.query}'")
-        query_emb = get_embeddings_from_llama([request.query])[0]
+        query_emb = get_embeddings_from_llama([request.query], model="mistral:7b")[0]
         results = search_similar(collection_name, query_emb, request.fileIds, request.top_k)
         formatted_results = []
         for i, result in enumerate(results):

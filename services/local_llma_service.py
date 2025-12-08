@@ -297,6 +297,3 @@ class LocalLlamaService:
     Question: {question}
 
     Answer in Markdown format:"""
-
-    # Global instance
-local_llama = LocalLlamaService()

@@ -1,27 +1,150 @@
+import asyncio
 from datetime import datetime
 import os
 import uuid
 from fastapi import UploadFile, HTTPException
 from typing import Any, Dict, List, Optional
-
+import logging
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from db.qdrant_service import get_qdrant_client
+from services.azure_blob_service_async import get_async_blob_service
 from services.templates_utilitis import classify_document_type, count_placeholders, extract_key_topics, find_completion_points, identify_sections
-from services.utils import extract_text_from_file, validate_file_type
+from services.utils import extract_text_from_bytes, extract_text_from_file, validate_file_type
+
+logger = logging.getLogger(__name__)
 
 # Configuration
 TEMPLATES_BASE_DIR = "Templates"
 CUSTOMER_ID = 1  # Your customer ID
 
+# async def upload_template_files(
+#     files: List[UploadFile],
+#     target_path: str = "",
+#     category: str = ""
+# ) -> dict:
+#     """
+#     Upload template files and save metadata in Qdrant
+#     """
+#     upload_results = []
+#     errors = []
+    
+#     # Normalize paths
+#     target_path = normalize_template_path(target_path)
+#     category = normalize_template_path(category)
+    
+#     # Create full target directory with category
+#     if category:
+#         full_target_dir = os.path.join(TEMPLATES_BASE_DIR, category, target_path)
+#     else:
+#         full_target_dir = os.path.join(TEMPLATES_BASE_DIR, target_path)
+    
+#     os.makedirs(full_target_dir, exist_ok=True)
+    
+#     # Get Qdrant client
+#     qdrant_client = get_qdrant_client()
+#     collection_name = f"customer_{CUSTOMER_ID}_templates"
+    
+#     # Ensure collection exists
+#     await ensure_templates_collection(qdrant_client, collection_name)
+    
+#     for file in files:
+#         try:
+#             validate_file_type(file.filename)
+#             file_id = str(uuid.uuid4())
+#             safe_filename = f"{file_id}_{file.filename}"
+            
+#             # Create file path with category
+#             if category:
+#                 file_path = os.path.join(TEMPLATES_BASE_DIR, category, target_path, safe_filename)
+#                 relative_file_path = os.path.join(category, target_path, safe_filename)
+#             else:
+#                 file_path = os.path.join(TEMPLATES_BASE_DIR, target_path, safe_filename)
+#                 relative_file_path = os.path.join(target_path, safe_filename)
+            
+#             # Save the file to filesystem
+#             with open(file_path, "wb") as f:
+#                 content = await file.read()
+#                 f.write(content)
+            
+#             # Verify file was saved
+#             if not os.path.exists(file_path):
+#                 errors.append(f"File {file.filename}: Failed to save")
+#                 continue
+            
+#             # Get file info
+#             file_size = os.path.getsize(file_path)
+#             created_time = datetime.now()
+            
+#             # Analyze template content
+#             template_analysis = await analyze_template_content(file_path, file.filename)
+            
+#             # Save metadata to Qdrant
+#             metadata_id = await save_template_metadata_to_qdrant(
+#                 qdrant_client=qdrant_client,
+#                 collection_name=collection_name,
+#                 file_id=file_id,
+#                 original_filename=file.filename,
+#                 safe_filename=safe_filename,
+#                 file_path=file_path,
+#                 relative_path=relative_file_path,
+#                 target_path=target_path,
+#                 category=category,  # NEW: Add category
+#                 file_size=file_size,
+#                 content_type=file.content_type,
+#                 created_time=created_time,
+#                 analysis=template_analysis
+#             )
+            
+#             upload_results.append({
+#                 "fileId": file_id,
+#                 "metadataId": metadata_id,
+#                 "filename": file.filename,
+#                 "savedAs": safe_filename,
+#                 "path": target_path,
+#                 "category": category,  # NEW: Add category to response
+#                 "fullPath": relative_file_path,
+#                 "size": file_size,
+#                 "fileType": file.content_type,
+#                 "created": created_time.isoformat(),
+#                 "analysis": template_analysis,
+#                 "metadataSaved": metadata_id is not None
+#             })
+            
+#             print(f"✅ Template uploaded: {file.filename}")
+#             print(f"   📁 Category: {category}")
+#             print(f"   📁 Path: {target_path}")
+#             print(f"   💾 Saved to: {relative_file_path}")
+#             print(f"   🗄️  Metadata ID: {metadata_id}")
+            
+#         except Exception as e:
+#             errors.append(f"File {file.filename}: Upload failed - {str(e)}")
+#             print(f"❌ Error uploading {file.filename}: {e}")
+    
+#     response_content = {
+#         "uploaded": upload_results,
+#         "targetPath": target_path,
+#         "category": category,  # NEW: Add category to response
+#         "fullTargetDir": full_target_dir,
+#         "totalUploaded": len(upload_results)
+#     }
+    
+#     if errors:
+#         response_content["errors"] = errors
+    
+#     return response_content
+
 async def upload_template_files(
     files: List[UploadFile],
     target_path: str = "",
-    category: str = ""
+    category: str = "",
+    customer_id: str = "1"
 ) -> dict:
     """
-    Upload template files and save metadata in Qdrant
+    Upload template files to Azure Blob Storage
     """
+    
+    
     upload_results = []
     errors = []
     
@@ -29,106 +152,306 @@ async def upload_template_files(
     target_path = normalize_template_path(target_path)
     category = normalize_template_path(category)
     
-    # Create full target directory with category
-    if category:
-        full_target_dir = os.path.join(TEMPLATES_BASE_DIR, category, target_path)
-    else:
-        full_target_dir = os.path.join(TEMPLATES_BASE_DIR, target_path)
-    
-    os.makedirs(full_target_dir, exist_ok=True)
-    
     # Get Qdrant client
     qdrant_client = get_qdrant_client()
-    collection_name = f"customer_{CUSTOMER_ID}_templates"
+    collection_name = f"customer_{customer_id}_templates"
     
     # Ensure collection exists
     await ensure_templates_collection(qdrant_client, collection_name)
     
+    # Get blob service WITHOUT async context manager
+    blob_service = await get_async_blob_service(base_folder="Templates")
+    
+    # Process files sequentially for now to avoid thread pool issues
     for file in files:
         try:
-            validate_file_type(file.filename)
-            file_id = str(uuid.uuid4())
-            safe_filename = f"{file_id}_{file.filename}"
-            
-            # Create file path with category
-            if category:
-                file_path = os.path.join(TEMPLATES_BASE_DIR, category, target_path, safe_filename)
-                relative_file_path = os.path.join(category, target_path, safe_filename)
-            else:
-                file_path = os.path.join(TEMPLATES_BASE_DIR, target_path, safe_filename)
-                relative_file_path = os.path.join(target_path, safe_filename)
-            
-            # Save the file to filesystem
-            with open(file_path, "wb") as f:
-                content = await file.read()
-                f.write(content)
-            
-            # Verify file was saved
-            if not os.path.exists(file_path):
-                errors.append(f"File {file.filename}: Failed to save")
-                continue
-            
-            # Get file info
-            file_size = os.path.getsize(file_path)
-            created_time = datetime.now()
-            
-            # Analyze template content
-            template_analysis = await analyze_template_content(file_path, file.filename)
-            
-            # Save metadata to Qdrant
-            metadata_id = await save_template_metadata_to_qdrant(
+            result = await process_single_template_safe(
+                blob_service=blob_service,
                 qdrant_client=qdrant_client,
-                collection_name=collection_name,
-                file_id=file_id,
-                original_filename=file.filename,
-                safe_filename=safe_filename,
-                file_path=file_path,
-                relative_path=relative_file_path,
+                file=file,
                 target_path=target_path,
-                category=category,  # NEW: Add category
-                file_size=file_size,
-                content_type=file.content_type,
-                created_time=created_time,
-                analysis=template_analysis
+                category=category,
+                collection_name=collection_name,
+                customer_id=customer_id
             )
             
-            upload_results.append({
-                "fileId": file_id,
-                "metadataId": metadata_id,
-                "filename": file.filename,
-                "savedAs": safe_filename,
-                "path": target_path,
-                "category": category,  # NEW: Add category to response
-                "fullPath": relative_file_path,
-                "size": file_size,
-                "fileType": file.content_type,
-                "created": created_time.isoformat(),
-                "analysis": template_analysis,
-                "metadataSaved": metadata_id is not None
-            })
-            
-            print(f"✅ Template uploaded: {file.filename}")
-            print(f"   📁 Category: {category}")
-            print(f"   📁 Path: {target_path}")
-            print(f"   💾 Saved to: {relative_file_path}")
-            print(f"   🗄️  Metadata ID: {metadata_id}")
-            
+            if "error" in result:
+                errors.append(f"File {file.filename}: {result['error']}")
+            else:
+                upload_results.append(result)
+                logger.info(f"✅ Template uploaded: {file.filename}")
+                
         except Exception as e:
             errors.append(f"File {file.filename}: Upload failed - {str(e)}")
-            print(f"❌ Error uploading {file.filename}: {e}")
+            logger.error(f"❌ Error uploading {file.filename}: {e}")
+    
+    # Don't close blob_service here - let it be reused
     
     response_content = {
         "uploaded": upload_results,
         "targetPath": target_path,
-        "category": category,  # NEW: Add category to response
-        "fullTargetDir": full_target_dir,
-        "totalUploaded": len(upload_results)
+        "category": category,
+        "totalUploaded": len(upload_results),
+        "totalProcessed": len(files)
     }
     
     if errors:
         response_content["errors"] = errors
     
     return response_content
+
+
+async def process_single_template_safe(
+    blob_service,
+    qdrant_client,
+    file: UploadFile,
+    target_path: str,
+    category: str,
+    collection_name: str,
+    customer_id: str
+) -> Dict[str, Any]:
+    """
+    Process a single template file safely
+    """
+    try:
+        # Validate file type
+        validate_file_type(file.filename)
+        
+        # Read file content
+        content = await file.read()
+        
+        # Upload to Azure Blob Storage
+        upload_result = await blob_service.upload_file(
+            customer_id=customer_id,
+            file_content=content,
+            filename=file.filename,
+            category=category,
+            target_path=target_path,
+            content_type=file.content_type,
+            metadata={
+                "category": category,
+                "type": "template",
+                "filename": file.filename
+            }
+        )
+        
+        # Analyze template content
+        template_analysis = await analyze_template_content_simple(content, file.filename)
+        
+        # Save metadata to Qdrant
+        metadata_id = await save_template_metadata_async(
+            qdrant_client=qdrant_client,
+            collection_name=collection_name,
+            file_id=upload_result["file_id"],
+            filename=file.filename,
+            blob_metadata=upload_result,
+            target_path=target_path,
+            category=category,
+            analysis=template_analysis
+        )
+        
+        return {
+            "fileId": upload_result["file_id"],
+            "metadataId": metadata_id,
+            "filename": file.filename,
+            "path": target_path,
+            "category": category,
+            "blobUrl": upload_result["blob_url"],
+            "blobName": upload_result["blob_name"],
+            "size": upload_result["size"],
+            "fileType": file.content_type,
+            "analysis": template_analysis,
+            "metadataSaved": metadata_id is not None
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Processing error: {e}", exc_info=True)
+        return {"error": str(e)}
+
+
+async def save_template_metadata_async(
+    qdrant_client,
+    collection_name: str,
+    file_id: str,
+    filename: str,
+    blob_metadata: Dict[str, Any],
+    target_path: str,
+    category: str,
+    analysis: Dict[str, Any]
+) -> str:
+    """
+    Save template metadata to Qdrant asynchronously
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        save_template_metadata_sync,
+        qdrant_client,
+        collection_name,
+        file_id,
+        filename,
+        blob_metadata,
+        target_path,
+        category,
+        analysis
+    )
+
+
+def save_template_metadata_sync(
+    qdrant_client,
+    collection_name: str,
+    file_id: str,
+    filename: str,
+    blob_metadata: Dict[str, Any],
+    target_path: str,
+    category: str,
+    analysis: Dict[str, Any]
+) -> str:
+    """
+    Save template metadata to Qdrant using NAMED vectors
+    """
+    try:
+        from qdrant_client.models import PointStruct
+        
+        metadata_id = str(uuid.uuid4())
+        created_time = datetime.now()
+        
+        # Create payload
+        payload = {
+            "id": metadata_id,
+            "file_id": file_id,
+            "filename": filename,
+            "safe_filename": f"{file_id}_{filename}",
+            "full_file_path": blob_metadata.get("full_file_path", ""),
+            "relative_path": blob_metadata.get("blob_name", ""),
+            "target_path": target_path,
+            "category": category,
+            "file_size": blob_metadata.get("size", 0),
+            "content_type": blob_metadata.get("content_type", ""),
+            "created_time": created_time.isoformat(),
+            "type": "template",
+            "analysis": analysis,
+            "storage_type": "azure_blob",
+            "blob_name": blob_metadata.get("blob_name"),
+            "blob_url": blob_metadata.get("blob_url"),
+            "container": blob_metadata.get("container"),
+            "base_folder": blob_metadata.get("base_folder", "Templates")
+        }
+        
+        # Create a simple embedding
+        import numpy as np
+        text_for_embedding = f"{filename} {category} {target_path}"
+        simple_embedding = create_simple_embedding(text_for_embedding, vector_size=384)
+        
+        # Normalize
+        norm = np.linalg.norm(simple_embedding)
+        if norm > 0:
+            simple_embedding = (simple_embedding / norm).tolist()
+        
+        # **FIXED: Use named vector format**
+        point = PointStruct(
+            id=metadata_id,
+            vector={
+                "metadata": simple_embedding  # Named vector
+            },
+            payload=payload
+        )
+        
+        # Save to Qdrant
+        qdrant_client.upsert(
+            collection_name=collection_name,
+            points=[point],
+            wait=True
+        )
+        
+        logger.info(f"✅ Template metadata saved with named vector: {filename}")
+        return metadata_id
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to save template metadata: {e}", exc_info=True)
+        return None
+
+async def analyze_template_content_simple(content: bytes, filename: str) -> Dict[str, Any]:
+    """
+    Simple async template content analysis
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        analyze_template_content_simple_sync,
+        content,
+        filename
+    )
+
+
+def analyze_template_content_simple_sync(content: bytes, filename: str) -> Dict[str, Any]:
+    """
+    Simple sync template analysis
+    """
+    try:
+        # Extract text
+        text = extract_text_from_bytes(content, filename)
+        
+        return {
+            "char_count": len(text),
+            "word_count": len(text.split()),
+            "language": "unknown",
+            "has_tables": False,
+            "has_images": False,
+            "sections": [],
+            "keywords": [],
+            "estimated_pages": len(text) // 1500 + 1,
+            "text_preview": text[:200] + "..." if len(text) > 200 else text
+        }
+    except Exception as e:
+        logger.error(f"❌ Analysis error: {e}")
+        return {
+            "char_count": 0,
+            "word_count": 0,
+            "language": "unknown",
+            "has_tables": False,
+            "has_images": False,
+            "sections": [],
+            "keywords": [],
+            "estimated_pages": 0,
+            "text_preview": ""
+        }
+
+
+def create_simple_embedding(text: str, vector_size: int = 384) -> List[float]:
+    """
+    Create simple embedding for testing
+    """
+    import hashlib
+    import struct
+    
+    if not text:
+        return [0.0] * vector_size
+    
+    text_hash = hashlib.sha256(text.encode()).digest()
+    floats = []
+    
+    for i in range(0, min(len(text_hash), vector_size * 4), 4):
+        if i + 4 <= len(text_hash):
+            val = struct.unpack('I', text_hash[i:i+4])[0]
+            normalized = (val / 2**32) * 2 - 1
+            floats.append(normalized)
+    
+    if len(floats) < vector_size:
+        floats.extend([0.0] * (vector_size - len(floats)))
+    
+    return floats[:vector_size]
+
+
+# Utility functions
+def normalize_template_path(path: str) -> str:
+    if not path:
+        return ""
+    path = path.strip("/").strip("\\")
+    path = path.replace("\\", "/")
+    while "//" in path:
+        path = path.replace("//", "/")
+    return path
 
 async def ensure_templates_collection(qdrant_client: QdrantClient, collection_name: str):
     """
@@ -144,7 +467,7 @@ async def ensure_templates_collection(qdrant_client: QdrantClient, collection_na
             qdrant_client.create_collection(
                 collection_name=collection_name,
                 vectors_config={
-                    "metadata": VectorParams(size=1, distance=Distance.COSINE)
+                    "metadata": VectorParams(size=384, distance=Distance.COSINE)
                 }
             )
             print(f"✅ Created Qdrant collection: {collection_name}")
@@ -180,7 +503,7 @@ async def save_template_metadata_to_qdrant(
         # Create comprehensive metadata payload
         metadata_payload = {
             "file_id": file_id,
-            "original_filename": original_filename,
+            "filename": original_filename,
             "safe_filename": safe_filename,
             "file_path": file_path,
             "full_file_path": file_path,

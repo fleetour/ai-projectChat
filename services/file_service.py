@@ -40,6 +40,57 @@ def normalize_target_path(target_path: str) -> str:
     
     return target_path
 
+async def find_file_payload(
+    collection_name: str, 
+    file_id: str
+) -> str:
+    """
+    Find file path by file_id in Qdrant collection
+    
+    Args:
+        collection_name: Name of the Qdrant collection
+        file_id: ID of the file to find
+        
+    Returns:
+        Full file path if found
+        
+    Raises:
+        HTTPException: If file not found in collection
+    """
+    try:
+        client = get_qdrant_client()
+        
+        # Search for points with the given file_id
+        scroll_result = client.scroll(
+            collection_name=collection_name,
+            scroll_filter={
+                "must": [
+                    {"key": "file_id", "match": {"value": file_id}}
+                ]
+            },
+            limit=1,
+            with_payload=True,
+            with_vectors=False
+        )
+        
+        if not scroll_result[0]:
+            raise HTTPException(
+                status_code=404,
+                detail=f"File with ID {file_id} not found in collection {collection_name}"
+            )
+        
+        point = scroll_result[0][0]
+        payload = point.payload
+        return payload
+       
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error finding file: {str(e)}"
+        )
 
 async def find_file_path_by_id(
     collection_name: str, 

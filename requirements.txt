@@ -10,3 +10,4 @@ qdrant-client
 dotenv
 ollama
 aiohttp
+azure-storage-blob

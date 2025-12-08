@@ -273,7 +273,6 @@ async def create_filled_document(
         ensure_cosine_collection(qdrant_client, collection_name, vector_size=4096)
         
         save_embeddings_with_path(
-            qdrant_client=qdrant_client,
             collection_name=collection_name,
             file_id=file_id,
             filename=output_filename,

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 import uuid
-from fastapi import APIRouter, BackgroundTasks, Form, HTTPException, UploadFile, File
+from fastapi import APIRouter, BackgroundTasks, Form, HTTPException, Header, UploadFile, File
 from fastapi.responses import JSONResponse
 import os
 import logging
@@ -67,36 +67,59 @@ class GeneratedFileInfo(BaseModel):
 async def upload_templates(
     target_path: str = Form(""),
     category: str = Form(""),
-    files: List[UploadFile] = File(...)
+    files: List[UploadFile] = File(...),
+    customer_id: str = Header(default="1")  # Or from auth/token
 ):
     """
-    Upload template files with metadata stored in Qdrant
+    Async upload template files with Azure Blob Storage.
+    Supports multiple concurrent uploads.
     """
     try:
         # Validate file types
-        valid_extensions = {'.docx', '.doc', '.txt', '.md'}
+        valid_extensions = {'.docx', '.doc', '.txt', '.md', '.pdf'}
         invalid_files = []
-        if (category.strip() == ""):
+        
+        if not category.strip():
             raise HTTPException(status_code=400, detail="Category is required")
         
+        # Quick validation
         for file in files:
             file_ext = os.path.splitext(file.filename)[1].lower()
             if file_ext not in valid_extensions:
                 invalid_files.append(file.filename)
         
         if invalid_files:
-            return {
-                "error": "Invalid file types",
-                "invalid_files": invalid_files,
-                "allowed_extensions": list(valid_extensions)
-            }
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "Invalid file types",
+                    "invalid_files": invalid_files,
+                    "allowed_extensions": list(valid_extensions)
+                }
+            )
         
-        # Upload files with Qdrant metadata
-        result = await upload_template_files(files, target_path, category)
-        return result
+        # Process files concurrently
+        result = await upload_template_files(
+            files=files,
+            target_path=target_path,
+            category=category,
+            customer_id=customer_id
+        )
         
+        # Add validation info
+        # result["validated_files"] = len(files) - len(invalid_files)
+        # result["invalid_files"] = invalid_files
+        
+        return JSONResponse(content=result)
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+        logger.error(f"❌ Template upload failed: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Upload failed: {str(e)}"
+        )
 
 @router.get("/metadata/{file_id}")
 async def get_template_metadata_endpoint(file_id: str):
@@ -441,7 +464,6 @@ async def process_template_generation(generation_id: str, request: TemplateGener
         ensure_cosine_collection(qdrant_client, collection_name, vector_size=4096)
         
         save_embeddings_with_path(
-            qdrant_client=qdrant_client,
             collection_name=collection_name,
             file_id=file_id,
             filename=output_filename,
