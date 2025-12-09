@@ -13,7 +13,7 @@ from services.utils import normalize_vector
 logger = logging.getLogger(__name__)
 
 class LocalLlamaService:
-    def __init__(self, model: str = "llama3:8b"):
+    def __init__(self, model: str = "mistral:7b"): #llama3:8b
         self.model = model
         self.ollama_path = self._find_ollama_path()
         self._test_connection()
@@ -52,7 +52,6 @@ class LocalLlamaService:
                 # Clean the text
                 cleaned_text = self._clean_text(text)
                 if not cleaned_text:
-                    print(f"⚠️  Empty text after cleaning, using fallback embedding")
                     embeddings.append(self._create_fallback_embedding())
                     continue
                 
@@ -130,7 +129,6 @@ class LocalLlamaService:
         
         # Ensure minimum length
         if len(cleaned) < 10:
-            print(f"⚠️  Text too short after cleaning: '{cleaned}'")
             return ""
         
         return cleaned
@@ -214,9 +212,20 @@ class LocalLlamaService:
             logger.error(f"Error in chat completion: {e}")
             return "I'm sorry, I couldn't process your request at the moment."
     
-    async def get_llama_stream_completion(self, prompt: str, context: str = "") -> AsyncGenerator[str, None]:
-        """Stream completion using local Llama model"""
-        full_prompt = self._build_prompt(prompt, context)
+    async def get_llama_stream_completion(
+        self, 
+        question: str, 
+        context: str = "", 
+        conversation_history: str = "",
+        context_description: str = ""
+    ) -> AsyncGenerator[str, None]:
+        """Stream completion with conversation history support."""
+        full_prompt = self._build_prompt_with_history(
+            question=question,
+            context=context,
+            conversation_history=conversation_history,
+            context_description=context_description
+        )
         
         try:
             import aiohttp
@@ -253,7 +262,6 @@ class LocalLlamaService:
                                     chunk = data['response']
                                     yield chunk
                                 
-                                # Check if this is the final response
                                 if data.get('done', False):
                                     logger.info("✅ Stream completion finished")
                                     break
@@ -272,28 +280,48 @@ class LocalLlamaService:
             logger.error(f"Error in stream completion: {e}")
             yield "I'm sorry, I couldn't process your request at the moment."
     
-    # In deiner local_llama_service.py - _build_prompt Methode anpassen
-    def _build_prompt(self, question: str, context: str = "") -> str:
-        """Build the prompt for the model with markdown formatting"""
+    def _build_prompt_with_history(
+        self, 
+        question: str, 
+        context: str = "", 
+        conversation_history: str = "",
+        context_description: str = ""
+    ) -> str:
+        """Build prompt with conversation history and context awareness."""
+        
+        # Base system message with context awareness
+        system_message = f"""You are a helpful assistant for project documents.
+        
+{context_description}
+
+IMPORTANT: Format your response using Markdown for better readability:
+- Use **bold** for important terms
+- Use *italic* for emphasis  
+- Use `code` for technical terms
+- Use lists with - or * for multiple items
+- Use headings with ## when appropriate
+- Reference specific documents when relevant
+
+Consider the conversation history when answering."""
+        
+        # Build the full prompt
+        prompt_parts = []
+        
+        # 1. System message
+        prompt_parts.append(system_message)
+        
+        # 2. Conversation history (if any)
+        if conversation_history:
+            prompt_parts.append(f"\nConversation History:\n{conversation_history}")
+        
+        # 3. Document context
         if context:
-            return f"""Based on the following context, please answer the question. If the context doesn't contain enough information to answer the question, please say so.
-
-    IMPORTANT: Format your response using Markdown for better readability:
-    - Use **bold** for important terms
-    - Use *italic* for emphasis  
-    - Use `code` for technical terms
-    - Use lists with - or * for multiple items
-    - Use headings with ## when appropriate
-
-    Context:
-    {context}
-
-    Question: {question}
-
-    Answer in Markdown format:"""
-        else:
-            return f"""Please answer the following question using Markdown formatting for better readability:
-
-    Question: {question}
-
-    Answer in Markdown format:"""
+            prompt_parts.append(f"\nRelevant Document Context:\n{context}")
+        
+        # 4. Current question
+        prompt_parts.append(f"\nCurrent Question: {question}")
+        
+        # 5. Instruction
+        prompt_parts.append("\nPlease answer based on the document context and conversation history. If the context doesn't contain enough information, please say so.\n\nAnswer in Markdown format:")
+        
+        return "\n".join(prompt_parts)

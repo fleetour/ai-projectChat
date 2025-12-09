@@ -114,7 +114,72 @@ class AsyncAzureBlobService:
             except Exception as e:
                 logger.error(f"❌ Container error {container_name}: {e}")
                 raise
-    
+
+    async def download_file(self, customer_id: str, blob_name: str) -> Tuple[bytes, dict]:
+        """
+        Download a file from Azure Blob Storage asynchronously.
+        
+        Args:
+            customer_id: Customer identifier
+            blob_name: Full blob path
+        
+        Returns:
+            Tuple[bytes, dict]: File content and blob properties
+        """
+        container_name = self.get_container_name(customer_id)
+        
+        async with BlobServiceClient.from_connection_string(self.connection_string) as blob_service_client:
+            try:
+                container_client = blob_service_client.get_container_client(container_name)
+                blob_client = container_client.get_blob_client(blob_name)
+                
+                # Check if blob exists
+                if not await blob_client.exists():
+                    raise ResourceNotFoundError(f"Blob {blob_name} not found")
+                
+                # Download blob
+                download_stream = await blob_client.download_blob()
+                content = await download_stream.readall()
+                
+                # Get properties
+                properties = await blob_client.get_blob_properties()
+                
+                blob_info = {
+                    "filename": os.path.basename(blob_name),
+                    "content_type": properties.content_settings.content_type,
+                    "size": properties.size,
+                    "last_modified": properties.last_modified,
+                    "metadata": properties.metadata,
+                    "blob_url": blob_client.url,
+                    "blob_name": blob_name,
+                    "container": container_name
+                }
+                
+                logger.info(f"✅ Downloaded: {blob_name}")
+                return content, blob_info
+                
+            except ResourceNotFoundError:
+                raise
+            except Exception as e:
+                logger.error(f"❌ Failed to download {blob_name}: {e}")
+                raise
+
+    async def delete_file(self, customer_id: str, blob_name: str) -> bool:
+        """Delete a file from Azure Blob Storage asynchronously."""
+        container_name = self.get_container_name(customer_id)
+
+        async with self.blob_service_client:
+            try:
+                container_client = self.blob_service_client.get_container_client(container_name)
+                blob_client = container_client.get_blob_client(blob_name)
+                
+                await blob_client.delete_blob()
+                logger.info(f"✅ Deleted blob: {blob_name}")
+                return True
+                
+            except Exception as e:
+                logger.error(f"❌ Failed to delete blob {blob_name}: {e}")
+
     async def upload_file(
         self,
         customer_id: str,

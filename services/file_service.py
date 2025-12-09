@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 from typing import List, Dict, Any, Optional
@@ -447,6 +448,18 @@ def flatten_tree_structure_simple(tree_nodes: List[Dict[str, Any]]) -> List[Dict
         add_all_nodes(node)
     
     return flat_list
+
+
+async def intelligent_chunking_simple_async(text: str, max_chunk_size: int = 1500, overlap: int = 200) -> List[str]:
+    """Async chunking."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        intelligent_chunking_simple,  # Your existing sync function
+        text,
+        max_chunk_size,
+        overlap
+    )
 
 
 def intelligent_chunking_simple(

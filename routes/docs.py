@@ -1,4 +1,7 @@
+import asyncio
+from datetime import datetime
 import io
+from pathlib import Path
 from typing import Literal
 from fastapi import APIRouter, Form, UploadFile, File, HTTPException, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -11,20 +14,23 @@ import numpy as np
 from qdrant_client import models
 import urllib
 
-from services.azure_blob_service import get_blob_service
+from services.azure_blob_service_async import get_async_blob_service
+from services.conversation_service import AsyncConversationService, get_conversation_service
 from services.embeddings_service import (
     ensure_cosine_collection,
+    get_embeddings_async,
     get_embeddings_from_llama,
     get_llama_chat_completion,
     normalize_vector,
+    save_embeddings_async,
     save_embeddings_with_path,
 )
-from services.file_service import build_file_structure_tree, find_file_path_by_id, find_file_payload, intelligent_chunking_simple, normalize_target_path
-from db.qdrant_service import ensure_collection, get_qdrant_client, search_similar, test_exact_vector_search
+from services.file_service import build_file_structure_tree, find_file_path_by_id, find_file_payload, intelligent_chunking_simple, intelligent_chunking_simple_async, normalize_target_path
+from db.qdrant_service import ensure_collection, ensure_collection_async, get_qdrant_client, search_similar
 from services.local_llma_service import LocalLlamaService
 from routes.schemas import QueryRequest
 from config import FILES_DIR, CUSTOMER_ID, VECTOR_SIZE
-from services.utils import calculate_adaptive_top_k, extract_text_from_bytes, extract_text_from_file, get_collection_name, get_content_type
+from services.utils import calculate_adaptive_top_k, extract_text_from_bytes, extract_text_from_bytes_async, extract_text_from_file, format_results_for_history, get_collection_name, get_content_type
 
 router = APIRouter(tags=["documents"])
 logger = logging.getLogger(__name__)
@@ -38,131 +44,209 @@ async def upload_files(
     target_path: str = Form(""),
     files: list[UploadFile] = File(...),
 ):
-    """Verbesserte Datei-Upload-Funktion mit Azure Blob Storage."""
+    """Async file upload function with Azure Blob Storage and parallel processing."""
     
     collection_name = f"customer_{CUSTOMER_ID}_documents"
-    ensure_collection(collection_name, vector_size=VECTOR_SIZE)
     
     if (not target_project) or target_project.strip() == "":
         raise HTTPException(status_code=400, detail="Target project must be specified")
 
-    # Get blob service
-    blob_service = get_blob_service()
+    # Get async blob service
+    blob_service = await get_async_blob_service(base_folder="Projects")
     
     upload_results = []
     errors = []
     target_path = normalize_target_path(target_path)
- 
-
-    for file in files:
-        file_id = str(uuid.uuid4())
+    
+    # Ensure collection exists (async if needed)
+    await ensure_collection_async(collection_name, vector_size=VECTOR_SIZE)
+    
+    # Process files in parallel with semaphore to limit concurrency
+    semaphore = asyncio.Semaphore(3)  # Process 3 files concurrently
+    
+    async def process_single_file(file: UploadFile) -> dict:
+        """Process a single file asynchronously."""
+        async with semaphore:
+            return await _process_file(
+                file=file,
+                blob_service=blob_service,
+                target_project=target_project,
+                target_path=target_path,
+                collection_name=collection_name
+            )
+    
+    # Create tasks for all files
+    processing_tasks = [process_single_file(file) for file in files]
+    
+    # Process files concurrently
+    results = await asyncio.gather(*processing_tasks, return_exceptions=True)
+    
+    # Collect results
+    for i, result in enumerate(results):
+        filename = files[i].filename if i < len(files) else f"file_{i}"
         
-        try:
-            # 1. Read file content
-            content = await file.read()
-            
-            # 2. Upload to Azure Blob using service
-            upload_result = blob_service.upload_file(
-                customer_id=str(CUSTOMER_ID),
-                file_content=content,
-                filename=file.filename,
-                target_project=target_project,
-                target_path=target_path,
-                content_type=file.content_type,
-                base_folder=FILES_DIR
-            )
-            
-            # 3. Extract text from content
-            text = extract_text_from_bytes(content, filename=file.filename)
-            
-            if not text or len(text.strip()) < 10:
-                errors.append(f"File {file.filename}: No readable text content found")
-                # Delete from Azure
-                blob_service.delete_file(CUSTOMER_ID, upload_result["blob_name"])
-                continue
-
-            # 4. INTELLIGENTES CHUNKING
-            chunks = intelligent_chunking_simple(
-                text=text,
-                max_chunk_size=1500,
-                overlap=200
-            )
-            
-            if not chunks:
-                errors.append(f"File {file.filename}: No valid text chunks created")
-                blob_service.delete_file(CUSTOMER_ID, upload_result["blob_name"])
-                continue
-
-            logger.info(f"✅ Processing {file.filename}: {len(chunks)} chunks")
-
-            # 5. Embeddings berechnen
-            all_embeddings = []
-            batch_size = 10
-            
-            for i in range(0, len(chunks), batch_size):
-                batch_chunks = chunks[i:i + batch_size]
-                batch_embeddings = get_embeddings_from_llama(batch_chunks, model="mistral:7b")
-                
-                if not batch_embeddings:
-                    raise Exception(f"Embedding batch {i//batch_size + 1} returned None")
-                
-                if len(batch_embeddings) != len(batch_chunks):
-                    logger.warning(f"Embedding mismatch: expected {len(batch_chunks)}, got {len(batch_embeddings)}")
-                    all_embeddings.extend(batch_embeddings[:len(batch_chunks)])
-                else:
-                    all_embeddings.extend(batch_embeddings)
-                
-                logger.debug(f"  Processed embedding batch {i//batch_size + 1}")
-
-            # 6. Adjust chunks if embedding mismatch
-            if len(all_embeddings) != len(chunks):
-                logger.warning(f"Final embedding mismatch for {file.filename}: chunks={len(chunks)}, embeddings={len(all_embeddings)}")
-                min_length = min(len(chunks), len(all_embeddings))
-                chunks = chunks[:min_length]
-                all_embeddings = all_embeddings[:min_length]
-
-            # 7. Save to Qdrant with Azure Blob metadata
-            save_embeddings_with_path(
-                collection_name=collection_name,
-                file_id=upload_result["file_id"],
-                filename=file.filename,
-                chunks=chunks,
-                embeddings=all_embeddings,
-                target_path=target_path,
-                target_project=target_project,
-                auto_generated=False,
-                source_template_id=None,
-                # Pass blob_metadata as a dictionary
-                blob_metadata=upload_result
-            )
-
-            upload_results.append({
-                "fileId": upload_result["file_id"],
-                "filename": file.filename,
-                "chunks": len(chunks),
-                "path": target_path,
-                "project": target_project,
-                "blobUrl": upload_result["blob_url"],
-                "container": upload_result["container"],
-                "blobPath": upload_result["blob_name"]
-            })
-
-        except Exception as e:
-            error_msg = f"File {file.filename}: Processing failed - {str(e)}"
-            errors.append(error_msg)
-            logger.error(f"❌ Error processing {file.filename}: {e}", exc_info=True)
-
+        if isinstance(result, Exception):
+            errors.append(f"File {filename}: Processing failed - {str(result)}")
+            logger.error(f"❌ Error processing {filename}: {result}", exc_info=True)
+        elif result.get("error"):
+            errors.append(f"File {filename}: {result['error']}")
+        else:
+            upload_results.append(result)
+            logger.info(f"✅ Successfully processed: {filename}")
+    
     response_content = {
         "uploaded": upload_results, 
         "targetPath": target_path, 
         "targetProject": target_project,
-        "container": f"customer_{CUSTOMER_ID}"
+        "container": f"customer_{CUSTOMER_ID}",
+        "totalProcessed": len(files),
+        "successful": len(upload_results),
+        "failed": len(errors)
     }
     
     if errors:
         response_content["errors"] = errors
         
     return JSONResponse(content=response_content)
+
+
+async def _process_file(
+    file: UploadFile,
+    blob_service,
+    target_project: str,
+    target_path: str,
+    collection_name: str
+) -> dict:
+    """Process a single file asynchronously."""
+    file_id = str(uuid.uuid4())
+    
+    try:
+        # 1. Read file content
+        content = await file.read()
+     
+        if target_path:
+        # If target_path is provided, join with target_project
+            target_path = str(Path(target_project) / target_path)
+        else:
+            # If target_path is empty, use just target_project
+            target_path = target_project
+
+        # 2. Upload to Azure Blob (async)
+        upload_result = await blob_service.upload_file(
+            customer_id=str(CUSTOMER_ID),
+            file_content=content,
+            filename=file.filename,
+            target_path=target_path,
+            content_type=file.content_type,
+            metadata={
+                "original_filename": file.filename,
+                "project": target_project,
+                "upload_path": target_path
+            }
+        )
+        
+        # 3. Extract text from content (async)
+        text = await extract_text_from_bytes_async(content, filename=file.filename)
+        
+        if not text or len(text.strip()) < 10:
+            # Delete from Azure if no text
+            try:
+                await blob_service.delete_file(str(CUSTOMER_ID), upload_result["blob_name"])
+            except Exception as delete_error:
+                logger.warning(f"Failed to delete blob: {delete_error}")
+            
+            return {"error": "No readable text content found"}
+        
+        # 4. Intelligent chunking (async)
+        chunks = await intelligent_chunking_simple_async(
+            text=text,
+            max_chunk_size=1500,
+            overlap=200
+        )
+        
+        if not chunks:
+            try:
+                await blob_service.delete_file(str(CUSTOMER_ID), upload_result["blob_name"])
+            except Exception as delete_error:
+                logger.warning(f"Failed to delete blob: {delete_error}")
+            
+            return {"error": "No valid text chunks created"}
+        
+        logger.info(f"✅ Processing {file.filename}: {len(chunks)} chunks")
+        
+        # 5. Get embeddings asynchronously in batches
+        all_embeddings = []
+        batch_size = 10
+        
+        for i in range(0, len(chunks), batch_size):
+            batch_chunks = chunks[i:i + batch_size]
+            batch_embeddings = await get_embeddings_async(
+                texts=batch_chunks,
+                model="mistral:7b"
+            )
+            
+            if not batch_embeddings:
+                # Clean up Azure blob
+                try:
+                    await blob_service.delete_file(str(CUSTOMER_ID), upload_result["blob_name"])
+                except:
+                    pass
+                return {"error": f"Embedding batch {i//batch_size + 1} failed"}
+            
+            if len(batch_embeddings) != len(batch_chunks):
+                logger.warning(f"Embedding mismatch: expected {len(batch_chunks)}, got {len(batch_embeddings)}")
+                all_embeddings.extend(batch_embeddings[:len(batch_chunks)])
+            else:
+                all_embeddings.extend(batch_embeddings)
+            
+            logger.debug(f"  Processed embedding batch {i//batch_size + 1}")
+        
+        # 6. Adjust chunks if embedding mismatch
+        if len(all_embeddings) != len(chunks):
+            logger.warning(f"Final embedding mismatch for {file.filename}: chunks={len(chunks)}, embeddings={len(all_embeddings)}")
+            min_length = min(len(chunks), len(all_embeddings))
+            chunks = chunks[:min_length]
+            all_embeddings = all_embeddings[:min_length]
+        
+        # 7. Save to Qdrant asynchronously
+        save_success = await save_embeddings_async(
+            collection_name=collection_name,
+            file_id=upload_result["file_id"],
+            filename=file.filename,
+            chunks=chunks,
+            embeddings=all_embeddings,
+            target_path=target_path,
+            target_project=target_project,
+            blob_metadata=upload_result,
+            auto_generated=False,
+            source_template_id=None
+        )
+        
+        if not save_success:
+            # Clean up Azure blob if Qdrant save failed
+            try:
+                await blob_service.delete_file(str(CUSTOMER_ID), upload_result["blob_name"])
+            except:
+                pass
+            return {"error": "Failed to save embeddings to database"}
+        
+        return {
+            "fileId": upload_result["file_id"],
+            "filename": file.filename,
+            "chunks": len(chunks),
+            "path": target_path,
+            "project": target_project,
+            "blobUrl": upload_result["blob_url"],
+            "container": upload_result["container"],
+            "blobPath": upload_result["blob_name"],
+            "size": upload_result["size"],
+            "contentType": file.content_type
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error processing {file.filename}: {e}", exc_info=True)
+        return {"error": str(e)}
+
 
 
 @router.post("/query")
@@ -191,25 +275,85 @@ async def query_docs_stream(request: QueryRequest, response: Response):
     collection_name = f"customer_{CUSTOMER_ID}_documents"
 
     async def generate():
+        conversation_id = None
+        
         try:
             print(f"🎯 STARTING QUERY STREAM: '{request.query}'")
-
-            adaptive_top_k = calculate_adaptive_top_k(request.query)
-            effective_top_k = max(request.top_k, adaptive_top_k)  # Use whichever is larger
             
+            # Get conversation ID from request or generate
+            conversation_id = getattr(request, 'conversation_id', None)
+            user_id = getattr(request, 'user_id', 'anonymous')
+            
+            if not conversation_id:
+                conversation_id = str(uuid.uuid4())
+                # Notify client of new conversation
+                yield f"data: {json.dumps({
+                    'type': 'conversation_created',
+                    'conversation_id': conversation_id
+                })}\n\n"
+            
+            print("before conv_service created")
+            # Get conversation history
+            conv_service = await get_conversation_service()
+            print("after conv_service created")
 
+            # Add user message
+            await conv_service.add_message(
+                conversation_id=conversation_id,
+                role="user",
+                content=request.query,
+                metadata={
+                    "project": request.project_name,
+                    "files": request.fileIds,
+                    "model": request.model
+                }
+            )
+            print("after add_message")
+            # Get recent history for context
+            history_messages = await conv_service.get_recent_history(conversation_id, max_messages=3)
+            conversation_history = "\n".join(history_messages) if history_messages else ""
+            print("after conversation_history")
+            adaptive_top_k = calculate_adaptive_top_k(request.query)
+            effective_top_k = max(request.top_k, adaptive_top_k)
+            
             query_emb = get_embeddings_from_llama([request.query], request.model)[0]
             results = search_similar(collection_name, query_emb, request.fileIds, request.project_name, effective_top_k)
-            
-           
+            print("after results")
             top_chunks = [r.payload["text"] for r in results]
             context = "\n\n".join(top_chunks)
-           
+            
             local_llama = LocalLlamaService(model=request.model)
             full_answer = ""
-            async for chunk in local_llama.get_llama_stream_completion(request.query, context):
+            
+            # Stream response with conversation_id in each chunk
+            async for chunk in local_llama.get_llama_stream_completion(
+                question=request.query,
+                context=context,
+                conversation_history=conversation_history
+            ):
                 full_answer += chunk
-                yield f"data: {json.dumps({'type': 'content', 'content': chunk})}\n\n"
+                yield f"data: {json.dumps({
+                    'type': 'content', 
+                    'content': chunk,
+                    'conversation_id': conversation_id  # Include in content chunks
+                })}\n\n"
+
+            # Add assistant response
+            await conv_service.add_message(
+                conversation_id=conversation_id,
+                role="assistant",
+                content=full_answer,
+                metadata={
+                    "sources": [
+                        {
+                            "file_id": r.payload.get("file_id"),
+                            "filename": r.payload.get("filename"),
+                            "score": float(r.score)
+                        }
+                        for r in results[:3]
+                    ]
+                }
+            )
 
             formatted_results = []
             for r in results:
@@ -222,14 +366,33 @@ async def query_docs_stream(request: QueryRequest, response: Response):
                 }
                 formatted_results.append(formatted_result)
 
-            sources_data = {"type": "sources", "sources": formatted_results}
+            # Send sources with conversation_id
+            sources_data = {
+                "type": "sources", 
+                "sources": formatted_results,
+                "conversation_id": conversation_id
+            }
             yield f"data: {json.dumps(sources_data)}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'content': full_answer})}\n\n"
+            
+            # Send completion with conversation info
+            conversation = await conv_service.get_conversation(conversation_id)
+            yield f"data: {json.dumps({
+                'type': 'done', 
+                'content': full_answer,
+                'conversation_id': conversation_id,
+                'history_length': len(conversation.get("messages", []))
+            })}\n\n"
+            
         except Exception as e:
             error_msg = f"Error in stream processing: {str(e)}"
-            logger.error(error_msg)
+            logger.error(error_msg, exc_info=True)
             yield f"data: {json.dumps({'type': 'error', 'error': error_msg})}\n\n"
 
+    # FIXED: Provide default value for conversation_id in headers
+    # We'll get it from the request or generate a placeholder
+    request_conversation_id = getattr(request, 'conversation_id', None)
+    headers_conversation_id = request_conversation_id or str(uuid.uuid4())
+    
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
@@ -238,6 +401,7 @@ async def query_docs_stream(request: QueryRequest, response: Response):
             "Connection": "keep-alive",
             "Access-Control-Allow-Origin": "*",
             "X-Accel-Buffering": "no",
+            "X-Conversation-ID": headers_conversation_id  # Always a string
         },
     )
 
@@ -283,11 +447,11 @@ async def download_file(
         original_filename = payload.get("filename")
         
         # 3. Get blob service
-        blob_service = get_blob_service()
+        blob_service = await get_async_blob_service(collection_type)
         
         # 4. Download file from Azure Blob
         try:
-            file_content, blob_info = blob_service.download_file(
+            file_content, blob_info = await blob_service.download_file(
                 customer_id=CUSTOMER_ID,
                 blob_name=blob_name
             )
@@ -504,17 +668,6 @@ async def health_check():
         return {"status": "unhealthy", "qdrant": "error", "llama": "error", "error": str(e)}
 
 
-@router.post("/test-embeddings")
-async def testembeedings():
-    collection_name = f"customer_{CUSTOMER_ID}_documents"
-    try:
-        query_emb = test_exact_vector_search(collection_name)
-        return JSONResponse(query_emb)
-    except Exception as e:
-        logger.error(f"Error in query processing: {e}")
-        return JSONResponse(content={"error": f"Failed to process query: {str(e)}"}, status_code=500)
-
-
 @router.get("/diagnose-collection")
 async def diagnose_collection():
     collection_name = f"customer_{CUSTOMER_ID}_documents"
@@ -555,28 +708,3 @@ async def diagnose_collection():
         return diagnostics
     except Exception as e:
         return {"error": str(e)}
-
-
-@router.post("/test-search-only")
-async def test_search_only(request: QueryRequest):
-    collection_name = f"customer_{CUSTOMER_ID}_documents"
-    try:
-        print(f"🧪 TEST SEARCH: '{request.query}'")
-        query_emb = get_embeddings_from_llama([request.query], model="mistral:7b")[0]
-        results = search_similar(collection_name, query_emb, request.fileIds, request.top_k)
-        formatted_results = []
-        for i, result in enumerate(results):
-            formatted_results.append(
-                {
-                    "rank": i + 1,
-                    "score": float(result.score),
-                    "filename": result.payload.get("filename", "N/A"),
-                    "file_id": result.payload.get("file_id", "N/A"),
-                    "text_preview": result.payload.get("text", "")[:100] + "..." if result.payload.get("text") else "No text",
-                    "chunk_index": result.payload.get("chunk_index", "N/A"),
-                }
-            )
-
-        return {"success": True, "query": request.query, "results_count": len(results), "results": formatted_results, "has_results": len(results) > 0}
-    except Exception as e:
-        return {"success": False, "error": str(e)}

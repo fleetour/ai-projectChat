@@ -1,3 +1,5 @@
+import asyncio
+from functools import partial
 import os
 from typing import List, Optional
 from qdrant_client import QdrantClient
@@ -16,6 +18,43 @@ QDRANT_PORT = int(os.getenv("QDRANT_PORT", 6333))
 
 # Global client instance (singleton pattern)
 _client = None
+_client_lock = asyncio.Lock()
+
+
+async def get_qdrant_client_async() -> QdrantClient:
+    """Get or create Qdrant client instance asynchronously."""
+    global _client
+    
+    if _client is None:
+        async with _client_lock:
+            if _client is None:  # Double-check pattern
+                try:
+                    print("🔄 Creating Qdrant client asynchronously...")
+                    
+                    # Run synchronous Qdrant client creation in thread pool
+                    loop = asyncio.get_event_loop()
+                    
+                    # Create client and test connection in thread pool
+                    _client = await loop.run_in_executor(
+                        None,  # Default thread pool executor
+                        partial(QdrantClient,
+                            host=QDRANT_HOST,
+                            port=QDRANT_PORT,
+                            timeout=30
+                        )
+                    )
+                    
+                    # Test connection asynchronously
+                    await loop.run_in_executor(None, _client.get_collections)
+                    
+                    logger.info(f"✅ Qdrant client connected to {QDRANT_HOST}:{QDRANT_PORT}")
+                except Exception as e:
+                    logger.error(f"❌ Failed to connect to Qdrant: {e}")
+                    # Clear the client on failure
+                    _client = None
+                    raise
+    
+    return _client
 
 def get_qdrant_client() -> QdrantClient:
     """Get or create Qdrant client instance with connection pooling."""
@@ -80,6 +119,18 @@ def ensure_collection(collection_name: str, vector_size: int = 384):
     """Wrapper that calls ensure_cosine_collection"""
     qdrant_client = get_qdrant_client()
     ensure_cosine_collection(qdrant_client, collection_name, vector_size)
+
+
+async def ensure_collection_async(collection_name: str, vector_size: int):
+    """Async version of ensure_collection."""
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(
+        None,
+        ensure_collection,  # Your existing sync function
+        collection_name,
+        vector_size
+    )
+    
 
 def save_embeddings(collection_name: str, file_id: str, filename: str, chunks: list, embeddings: list):
     """Save embeddings and their metadata to Qdrant."""
@@ -198,42 +249,3 @@ def close_connection():
         logger.info("✅ Qdrant connection closed")
 
 
-def test_exact_vector_search(collection_name: str):
-    """Test by searching for an exact existing vector"""
-    client = get_qdrant_client()
-    
-    try:
-        # Get first few points from the collection
-        points = client.scroll(
-            collection_name=collection_name,
-            limit=3,
-            with_payload=True,
-            with_vectors=True  # Get the actual vectors
-        )
-        
-        if not points[0]:
-            print("❌ No points found in collection")
-            return
-            
-        print("🧪 TEST: Searching with exact vectors from collection")
-        
-        for point in points[0]:
-            if point.vector:
-                # Search using the exact same vector
-                results = client.search(
-                    collection_name=collection_name,
-                    query_vector=point.vector,
-                    limit=3,
-                    with_payload=True
-                )
-                
-                print(f"📊 Search with vector ID {point.id}:")
-                for result in results:
-                    print(f"   Result ID: {result.id}, Score: {result.score}")
-                    
-                # The first result should have score ~1.0 for cosine similarity
-                if results and results[0].score < 0.9:
-                    print("❌ WARNING: Exact vector search returned low score!")
-                    
-    except Exception as e:
-        print(f"❌ Test failed: {e}")

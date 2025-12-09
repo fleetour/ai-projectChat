@@ -8,6 +8,8 @@ class QueryRequest(BaseModel):
     project_name: Optional[str] = None
     top_k: int = 5
     model: str
+    user_id: Optional[str] = None 
+    conversation_id: Optional[str] = None  
 
 class UploadRequest(BaseModel):
     target_path: Optional[str] = ""
@@ -39,3 +41,9 @@ class CreateProjectResponse(BaseModel):
 class DeleteProjectResponse(BaseModel):
     success: bool
     message: str = ""
+
+
+# Pydantic model for title update
+class UpdateTitleRequest(BaseModel):
+    new_title: str
+    user_id: str

@@ -1,10 +1,11 @@
+import asyncio
 import os
 from docx import Document
 from qdrant_client import QdrantClient
 import requests
 from dotenv import load_dotenv
 from mistralai import Mistral
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from config import FILES_DIR
 from datetime import datetime
 import uuid 
@@ -26,6 +27,7 @@ try:
 except ImportError:
     print("Warning: mistralai package not installed")
     client = None
+
 
 
 # def get_embeddings_from_mistral(texts: list):
@@ -67,8 +69,27 @@ except ImportError:
         
 #     except Exception as e:
 #         raise Exception(f"Failed to get Mistral chat completion: {str(e)}")
+
+async def get_embeddings_async(texts: List[str], model: str) -> List[List[float]]:
+    """Async embedding generation."""
+    # Example with OpenAI (if using):
+    # import openai
+    # response = await openai.Embedding.acreate(
+    #     model="text-embedding-ada-002",
+    #     input=texts
+    # )
+    # return [item['embedding'] for item in response['data']]
     
-def get_embeddings_from_llama(texts: List[str], model: str) -> List[List[float]]:
+    # For your Llama setup, use ThreadPoolExecutor
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        get_embeddings_from_llama,  # Your existing function
+        texts,
+        model
+    )
+
+def get_embeddings_from_llama(texts: List[str], model: str = "mistral:7b") -> List[List[float]]:
     """Get embeddings using local Llama"""
 
     if not model.strip():
@@ -109,6 +130,38 @@ def ensure_cosine_collection(qdrant_client: QdrantClient, collection_name: str, 
             vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE)
         )
         print("✅ Created new collection with Cosine distance")
+
+
+async def save_embeddings_async(
+    collection_name: str,
+    file_id: str,
+    filename: str,
+    chunks: List[str],
+    embeddings: List[List[float]],
+    target_path: str,
+    target_project: str,
+    blob_metadata: Dict[str, Any],
+    auto_generated: bool = False,
+    source_template_id: Optional[str] = None
+) -> bool:
+    """Async save embeddings to Qdrant."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        save_embeddings_with_path,  # Your existing sync function
+        collection_name,
+        file_id,
+        filename,
+        chunks,
+        embeddings,
+        target_path,
+        target_project,
+        auto_generated,
+        source_template_id,
+        blob_metadata
+    )
+
+
 
 def save_embeddings_with_path(
     collection_name: str, 

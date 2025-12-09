@@ -1,3 +1,4 @@
+import asyncio
 from docx import Document
 import numpy as np
 from typing import Any, Dict, List, Literal, Optional
@@ -100,6 +101,17 @@ def validate_file_type(filename: str) -> None:
             f"Supported types: {', '.join(SUPPORTED_EXTENSIONS)}. "
             f"Please convert to a supported format."
         )
+
+async def extract_text_from_bytes_async(content: bytes, filename: str) -> str:
+    """Async text extraction."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        extract_text_from_bytes,  # Your existing sync function
+        content,
+        filename
+    )
+
 
 def extract_text_from_bytes(content: bytes, filename: str, original_file_path: Optional[str] = None) -> str:
     """
@@ -258,3 +270,14 @@ def calculate_adaptive_top_k(query: str) -> int:
             return 8   # Moderate chunks for detail queries
     
     return 5  # Default for simple queries
+
+def format_results_for_history(results) -> List[Dict]:
+    """Format search results for history storage."""
+    return [
+        {
+            "file_id": r.payload.get("file_id"),
+            "filename": r.payload.get("filename"),
+            "score": float(r.score)
+        }
+        for r in results[:3]  # Store only top 3 in history
+    ]
