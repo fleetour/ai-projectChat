@@ -292,11 +292,9 @@ async def query_docs_stream(request: QueryRequest, response: Response):
                     'conversation_id': conversation_id
                 })}\n\n"
             
-            print("before conv_service created")
             # Get conversation history
             conv_service = await get_conversation_service()
-            print("after conv_service created")
-
+       
             # Add user message
             await conv_service.add_message(
                 conversation_id=conversation_id,
@@ -308,17 +306,16 @@ async def query_docs_stream(request: QueryRequest, response: Response):
                     "model": request.model
                 }
             )
-            print("after add_message")
             # Get recent history for context
             history_messages = await conv_service.get_recent_history(conversation_id, max_messages=3)
             conversation_history = "\n".join(history_messages) if history_messages else ""
-            print("after conversation_history")
+         
             adaptive_top_k = calculate_adaptive_top_k(request.query)
             effective_top_k = max(request.top_k, adaptive_top_k)
             
             query_emb = get_embeddings_from_llama([request.query], request.model)[0]
             results = search_similar(collection_name, query_emb, request.fileIds, request.project_name, effective_top_k)
-            print("after results")
+       
             top_chunks = [r.payload["text"] for r in results]
             context = "\n\n".join(top_chunks)
             

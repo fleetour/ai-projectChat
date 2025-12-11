@@ -291,7 +291,16 @@ class LocalLlamaService:
         
         # Base system message with context awareness
         system_message = f"""You are a helpful assistant for project documents.
-        
+
+**CRITICAL LANGUAGE RULES:**
+1. **ALWAYS respond in the SAME LANGUAGE as the user's question**
+2. If question is in German → respond in German
+3. If question is in English → respond in English  
+4. If question is in French → respond in French
+5. If question is in Arabic → respond in Arabic
+6. If question mixes languages → use the main language of the question
+7. **NEVER** translate the question or switch languages unless explicitly asked
+
 {context_description}
 
 IMPORTANT: Format your response using Markdown for better readability:
