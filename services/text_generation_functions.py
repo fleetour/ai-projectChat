@@ -9,12 +9,13 @@ import json
 
 from config import CUSTOMER_ID, FILES_DIR
 from db.qdrant_service import get_qdrant_client
+from services.azure_blob_service_async import get_async_blob_service
 from services.embeddings_service import ensure_cosine_collection, get_embeddings_from_llama, save_embeddings_with_path
 from services.file_service import normalize_target_path
 from services.local_llma_service import LocalLlamaService
 from services.projects_handler import get_project_file, get_project_file_content
 from services.templates_service import TEMPLATES_BASE_DIR, get_template_metadata
-from services.utils import extract_text_from_file
+from services.utils import extract_text_from_bytes_async, extract_text_from_file, get_collection_name
 
 # async def generate_filled_template(
 #     template_file_id: str,
@@ -138,7 +139,7 @@ from services.utils import extract_text_from_file
 async def fill_template_with_llm(
     template_file_path: str,
     source_files_content: List[Dict[str, Any]],
-    template_metadata: Dict[str, Any]
+    template_metadata: Dict[str, Any],
 ) -> str:
     """
     Use LLM to fill the actual template file while preserving structure
@@ -146,8 +147,17 @@ async def fill_template_with_llm(
     # Read the actual template file content
     print(f"🔍 DEBUG: Reading template file from: {template_file_path}")
     
-    template_content = extract_text_from_file(template_file_path)
+    collection_name = get_collection_name('templates')
     
+    blob_service = await get_async_blob_service("Templates")
+
+    file_content, blob_info = await blob_service.download_file(
+                    customer_id=CUSTOMER_ID,
+                    blob_name=template_file_path
+                )
+    
+    template_content = await extract_text_from_bytes_async(file_content, filename=blob_info.get("filename"))
+
     # Prepare context from source files with debugging
   
     

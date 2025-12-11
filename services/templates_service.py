@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 import logging
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
-from db.qdrant_service import get_qdrant_client
+from db.qdrant_service import get_qdrant_client, get_qdrant_client_async
 from services.azure_blob_service_async import get_async_blob_service
 from services.templates_utilitis import classify_document_type, count_placeholders, extract_key_topics, find_completion_points, identify_sections
 from services.utils import extract_text_from_bytes, extract_text_from_file, validate_file_type
@@ -563,20 +563,34 @@ async def save_template_metadata_to_qdrant(
     
 async def get_template_metadata(file_id: str) -> Optional[Dict[str, Any]]:
     """
-    Retrieve template metadata from Qdrant by file ID
+    Retrieve template metadata from Qdrant by file ID asynchronously
     """
     try:
-        qdrant_client = get_qdrant_client()
+        qdrant_client = await get_qdrant_client_async()  # Use async version
         collection_name = f"customer_{CUSTOMER_ID}_templates"
         
-        # Retrieve point by ID
-        points = qdrant_client.retrieve(
-            collection_name=collection_name,
-            ids=[file_id]
+        # Run synchronous Qdrant scroll in thread pool
+        loop = asyncio.get_event_loop()
+        points = await loop.run_in_executor(
+            None,
+            lambda: qdrant_client.scroll(
+                collection_name=collection_name,
+                scroll_filter={
+                    "must": [
+                        {
+                            "key": "file_id",
+                            "match": {
+                                "value": file_id
+                            }
+                        }
+                    ]
+                },
+                limit=1
+            )
         )
         
-        if points and len(points) > 0:
-            return points[0].payload
+        if points and len(points[0]) > 0:  # Note: scroll returns (points, next_page_offset)
+            return points[0][0].payload
         else:
             return None
             

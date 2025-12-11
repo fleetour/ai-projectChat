@@ -1,4 +1,5 @@
 from datetime import datetime
+import tempfile
 from typing import Any, Dict, List, Optional
 import uuid
 from fastapi import APIRouter, BackgroundTasks, Form, HTTPException, Header, UploadFile, File
@@ -9,13 +10,15 @@ import logging
 from grpc import Status
 from pydantic import BaseModel, Field
 from config import CUSTOMER_ID, FILES_DIR
-from db.qdrant_service import get_qdrant_client
+from db.qdrant_service import get_qdrant_client, get_qdrant_client_async
+from routes.docs import _process_file
+from services.azure_blob_service_async import get_async_blob_service
 from services.embeddings_service import ensure_cosine_collection, get_embeddings_from_llama, save_embeddings_with_path
 from services.file_service import build_file_structure_tree, normalize_target_path
 from services.projects_handler import get_project_file, get_project_file_content
 from services.templates_service import TEMPLATES_BASE_DIR, get_template_categories, get_template_metadata, list_all_templates_metadata, list_templates, search_templates, update_template_usage, upload_template_files
 from services.text_generation_functions import create_document_from_llm_content, create_filled_document, fill_template_with_llm
-from services.utils import extract_text_from_file
+from services.utils import extract_text_from_bytes_async, extract_text_from_file
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/templates", tags=["templates"])
@@ -374,10 +377,9 @@ async def process_template_generation(generation_id: str, request: TemplateGener
         if not template_metadata:
             raise ValueError(f"Template file not found: {request.template_file_id}")
         
-        template_file_path = template_metadata.get("file_path")
-        if not os.path.exists(template_file_path):
-            raise ValueError(f"Template file not found on disk: {template_file_path}")
-        
+        template_file_path = template_metadata.get("full_file_path")
+
+
         # Step 2: Validate source files exist
         generation_status_store[generation_id]['progress'] = 20.0
         source_files_metadata = []
@@ -392,11 +394,19 @@ async def process_template_generation(generation_id: str, request: TemplateGener
         # Step 3: Extract content from source files
         generation_status_store[generation_id]['progress'] = 30.0
         source_files_content = []
+        blob_service = await get_async_blob_service("Projects")
+       
         for source_metadata in source_files_metadata:
             file_path_to_read = source_metadata.get("file_path")
-            if file_path_to_read and os.path.exists(file_path_to_read):
+            print(f"file_path_to read: {file_path_to_read}")
+            if file_path_to_read:
                 try:
-                    content = extract_text_from_file(file_path_to_read)
+                    file_content, blob_info = await blob_service.download_file(
+                        customer_id=CUSTOMER_ID,
+                        blob_name=file_path_to_read
+                    )
+
+                    content = await extract_text_from_bytes_async(file_content, filename=blob_info.get("filename"))
                     source_files_content.append({
                         "filename": source_metadata.get("filename", "Unknown"),
                         "content": content,
@@ -416,81 +426,87 @@ async def process_template_generation(generation_id: str, request: TemplateGener
             template_metadata=template_metadata
         )
         
-        # Step 5: Create output file path FIRST
+        # Step 5: Create output document in temp location
         target_path = "generated"
         normalized_target_path = normalize_target_path(target_path)
-        full_target_dir = os.path.join(FILES_DIR, request.project_name, normalized_target_path)
-        os.makedirs(full_target_dir, exist_ok=True)
         
-        template_name = template_metadata.get("original_filename", "template")
+        template_name = template_metadata.get("filename", "template")
         base_name = os.path.splitext(template_name)[0]
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_filename = f"{base_name}_filled_{timestamp}.docx"
         file_id = str(uuid.uuid4())
-        file_path = os.path.join(full_target_dir, f"{file_id}_{output_filename}")
-        relative_file_path = os.path.join(normalized_target_path, f"{file_id}_{output_filename}")
         
-        # Create the document
-        create_document_from_llm_content(file_path, filled_content)
+        # Create temp file
+        with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.docx') as temp_file:
+            temp_file_path = temp_file.name
+            create_document_from_llm_content(temp_file_path, filled_content)
         
-        # Get file info
-        file_size = os.path.getsize(file_path)
-        created_time = datetime.now()
+        print(f"📄 Created temp document at: {temp_file_path}")
         
-        # Step 6: Process embeddings (do this synchronously to avoid race conditions)
+        # Step 6: REUSE the existing _process_file function
         generation_status_store[generation_id]['progress'] = 80.0
         
-        # Process the file for embeddings
-        text_for_embedding = filled_content[:5000]
-        if not text_for_embedding or len(text_for_embedding.strip()) < 10:
-            raise ValueError("No readable text content found in generated document")
+        # Create a mock UploadFile object for the generated document
+        with open(temp_file_path, 'rb') as f:
+            file_content = f.read()
         
-        chunks = [text_for_embedding[i:i + 500] for i in range(0, len(text_for_embedding), 500)]
-        chunks = [chunk for chunk in chunks if len(chunk.strip()) > 10]
+        # Create an UploadFile object
+        from fastapi import UploadFile
+        from io import BytesIO
+        from starlette.datastructures import Headers
         
-        if not chunks:
-            raise ValueError("No valid text chunks created from generated document")
+        # Create headers with content-type
+        headers = Headers({
+            "content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "content-disposition": f"form-data; name=\"files\"; filename=\"{output_filename}\""
+        })
         
-        print(f"📊 Processing generated document: {len(chunks)} chunks")
-        
-        # Get embeddings
-        embeddings = get_embeddings_from_llama(chunks)
-        if not embeddings or len(embeddings) != len(chunks):
-            raise ValueError("Embedding count mismatch for generated document")
-        
-        # Save to Qdrant
-        qdrant_client = get_qdrant_client()
-        collection_name = f"customer_{CUSTOMER_ID}_documents"
-        ensure_cosine_collection(qdrant_client, collection_name, vector_size=4096)
-        
-        save_embeddings_with_path(
-            collection_name=collection_name,
-            file_id=file_id,
+        generated_file = UploadFile(
             filename=output_filename,
-            chunks=chunks,
-            embeddings=embeddings,
-            target_path=normalized_target_path,
-            target_project=request.project_name,
-            auto_generated=True,
-            source_template_id=template_metadata.get("file_id")
+            file=BytesIO(file_content),
+            headers=headers
         )
         
-        # Step 7: Update final status
+        # Get blob service
+        blob_service = await get_async_blob_service(base_folder="Projects")
+        
+        # Reuse the existing _process_file function
+        collection_name = f"customer_{CUSTOMER_ID}_documents"
+        
+        # Call the same function used in upload endpoint
+        process_result = await _process_file(
+            file=generated_file,
+            blob_service=blob_service,
+            target_project=request.project_name,
+            target_path=normalized_target_path,
+            collection_name=collection_name
+        )
+        
+        # Clean up temp file
+        os.unlink(temp_file_path)
+        
+        # Check for processing errors
+        if "error" in process_result:
+            raise ValueError(f"Failed to process generated file: {process_result['error']}")
+        
+        # Step 7: Update final status with the result from _process_file
         generation_status_store[generation_id]['progress'] = 100.0
         generation_status_store[generation_id]['status'] = 'completed'
         generation_status_store[generation_id]['completed_at'] = datetime.now().isoformat()
         generation_status_store[generation_id]['result'] = {
             "output_file": {
-                "fileId": file_id,
+                "fileId": process_result.get("fileId", file_id),
                 "filename": output_filename,
                 "savedAs": f"{file_id}_{output_filename}",
                 "path": normalized_target_path,
                 "project": request.project_name,
-                "fullPath": relative_file_path,
-                "size": file_size,
+                "fullPath": process_result.get("blobPath", ""),
+                "blobUrl": process_result.get("blobUrl", ""),
+                "container": process_result.get("container", ""),
+                "size": process_result.get("size", 0),
                 "fileType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                "created": created_time.isoformat(),
-                "chunks": len(chunks),
+                "created": datetime.now().isoformat(),
+                "chunks": process_result.get("chunks", 0),
                 "metadataSaved": True,
                 "autoGenerated": True,
                 "sourceTemplateId": template_metadata.get("file_id")
@@ -502,7 +518,8 @@ async def process_template_generation(generation_id: str, request: TemplateGener
         }
         
         print(f"✅ Template generation completed: {generation_id}")
-        print(f"   Output file: {file_path}")
+        print(f"   File ID: {file_id}")
+        print(f"   Blob URL: {process_result.get('blobUrl')}")
         
     except Exception as e:
         print(f"❌ Template generation failed: {generation_id} - {e}")
