@@ -28,6 +28,7 @@ from config import FILES_DIR
 from routes.templates import router as templates_router
 from routes.projects import router as projects_router
 from routes.docs import router as docs_router
+from routes.conversations import router as conversation_router
 
 
 logging.basicConfig(level=logging.INFO)
@@ -52,3 +53,4 @@ os.makedirs(FILES_DIR, exist_ok=True)
 app.include_router(templates_router)
 app.include_router(projects_router)
 app.include_router(docs_router)
+app.include_router(conversation_router)

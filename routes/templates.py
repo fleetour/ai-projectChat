@@ -2,23 +2,21 @@ from datetime import datetime
 import tempfile
 from typing import Any, Dict, List, Optional
 import uuid
-from fastapi import APIRouter, BackgroundTasks, Form, HTTPException, Header, UploadFile, File
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Header, UploadFile, File
 from fastapi.responses import JSONResponse
 import os
 import logging
 
 from grpc import Status
 from pydantic import BaseModel, Field
-from config import CUSTOMER_ID, FILES_DIR
-from db.qdrant_service import get_qdrant_client, get_qdrant_client_async
 from routes.docs import _process_file
 from services.azure_blob_service_async import get_async_blob_service
-from services.embeddings_service import ensure_cosine_collection, get_embeddings_from_llama, save_embeddings_with_path
+from services.dependencies import get_customer_id
 from services.file_service import build_file_structure_tree, normalize_target_path
-from services.projects_handler import get_project_file, get_project_file_content
-from services.templates_service import TEMPLATES_BASE_DIR, get_template_categories, get_template_metadata, list_all_templates_metadata, list_templates, search_templates, update_template_usage, upload_template_files
-from services.text_generation_functions import create_document_from_llm_content, create_filled_document, fill_template_with_llm
-from services.utils import extract_text_from_bytes_async, extract_text_from_file
+from services.projects_handler import get_project_file
+from services.templates_service import TEMPLATES_BASE_DIR, get_template_metadata, list_templates, upload_template_files
+from services.text_generation_functions import create_document_from_llm_content,  fill_template_with_llm
+from services.utils import extract_text_from_bytes_async, get_collection_name
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/templates", tags=["templates"])
@@ -125,72 +123,36 @@ async def upload_templates(
         )
 
 @router.get("/metadata/{file_id}")
-async def get_template_metadata_endpoint(file_id: str):
+async def get_template_metadata_endpoint(file_id: str, customer_id: str = Depends(get_customer_id)):
     """Get template metadata from Qdrant by file ID"""
-    metadata = await get_template_metadata(file_id)
+    metadata = await get_template_metadata(file_id, customer_id)
     if not metadata:
         raise HTTPException(status_code=404, detail="Template metadata not found")
     return metadata
 
 
-@router.get("/metadata")
-async def list_templates_metadata(
-    category: str = "",
-    document_type: str = "",
-    complexity: str = ""
-):
-    """List all templates with metadata from Qdrant"""
-    metadata_list = await list_all_templates_metadata(category, document_type, complexity)
-    return {
-        "filters": {
-            "category": category,
-            "document_type": document_type,
-            "complexity": complexity
-        },
-        "templates": metadata_list,
-        "count": len(metadata_list)
-    }
 
-@router.get("/search")
-async def search_templates_endpoint(
-    query: str = "",
-    tags: str = "",
-    document_type: str = ""
-):
-    """Search templates by various criteria"""
-    tag_list = [tag.strip() for tag in tags.split(',')] if tags else []
-    results = await search_templates(query, tag_list, document_type)
-    return {
-        "query": query,
-        "tags": tag_list,
-        "document_type": document_type,
-        "results": results,
-        "count": len(results)
-    }
 
-@router.post("/usage/{file_id}")
+''' @router.post("/usage/{file_id}")
 async def record_template_usage(file_id: str):
     """Record that a template was used"""
     success = await update_template_usage(file_id)
-    return {"success": success, "file_id": file_id}
+    return {"success": success, "file_id": file_id} '''
 
-@router.get("/categories")
-async def get_categories():
-    categories = await get_template_categories()
-    return categories
 
 @router.get("/list")
-async def list_all_templates(category: str = ""):
-    templates = await list_templates(category)
+async def list_all_templates(category: str = "", customer_id: str = Depends(get_customer_id)):
+    templates = await list_templates(category, customer_id)
     return {"category": category or "root", "templates": templates, "count": len(templates)}
 
 @router.get("/{category_name}/files")
-async def get_project_files(category_name: str):
+async def get_project_files(category_name: str, 
+    customer_id: str = Depends(get_customer_id)):
     """Get all files in a specific project"""
     try:
-        
-        collection_name = f"customer_{CUSTOMER_ID}_templates"
- 
+
+        collection_name = get_collection_name("templates",customer_id)
+
         result = await build_file_structure_tree(category_name=category_name, collection_name=collection_name )
         
         return result
@@ -198,28 +160,6 @@ async def get_project_files(category_name: str):
         logger.error(f"Error retrieving files for category '{category_name}': {e}")
         raise HTTPException(status_code=500, detail=f"Error retrieving project files: {str(e)}")
 
-@router.delete("/{template_path:path}")
-async def delete_template(template_path: str):
-    try:
-        full_path = os.path.join(TEMPLATES_BASE_DIR, template_path)
-        if not os.path.exists(full_path):
-            raise HTTPException(status_code=404, detail="Template not found")
-        if not os.path.isfile(full_path):
-            raise HTTPException(status_code=400, detail="Path is not a file")
-
-        absolute_path = os.path.abspath(full_path)
-        templates_absolute = os.path.abspath(TEMPLATES_BASE_DIR)
-        if not absolute_path.startswith(templates_absolute):
-            raise HTTPException(status_code=403, detail="Invalid path")
-
-        os.remove(full_path)
-        return {"success": True, "message": f"Template deleted: {template_path}"}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
-    
 
 ## Generations 
 
@@ -234,7 +174,8 @@ generation_status_store = {}
 )
 async def generate_from_template(
     request: TemplateGenerationRequest,
-    background_tasks: BackgroundTasks
+    background_tasks: BackgroundTasks,
+    customer_id: str = Depends(get_customer_id)
 ):
     """
     Generate a new document by filling a template with content from source files
@@ -278,7 +219,8 @@ async def generate_from_template(
         background_tasks.add_task(
             process_template_generation,
             generation_id,
-            request
+            request,
+            customer_id
         )
         
         logger.info(f"🚀 Started template generation: {generation_id}")
@@ -362,7 +304,7 @@ async def get_generation_history(
 
 
 # Background task processing
-async def process_template_generation(generation_id: str, request: TemplateGenerationRequest):
+async def process_template_generation(generation_id: str, request: TemplateGenerationRequest, customer_id: str):
     """
     Background task to process template generation
     """
@@ -373,7 +315,7 @@ async def process_template_generation(generation_id: str, request: TemplateGener
         
         # Step 1: Validate template file exists
         generation_status_store[generation_id]['progress'] = 10.0
-        template_metadata = await get_template_metadata(request.template_file_id)
+        template_metadata = await get_template_metadata(request.template_file_id, customer_id)
         if not template_metadata:
             raise ValueError(f"Template file not found: {request.template_file_id}")
         
@@ -384,7 +326,7 @@ async def process_template_generation(generation_id: str, request: TemplateGener
         generation_status_store[generation_id]['progress'] = 20.0
         source_files_metadata = []
         for source_file_id in request.source_file_ids:
-            source_metadata = await get_project_file(source_file_id)
+            source_metadata = await get_project_file(source_file_id, customer_id)
             if source_metadata:
                 source_files_metadata.append(source_metadata)
         
@@ -402,7 +344,7 @@ async def process_template_generation(generation_id: str, request: TemplateGener
             if file_path_to_read:
                 try:
                     file_content, blob_info = await blob_service.download_file(
-                        customer_id=CUSTOMER_ID,
+                        customer_id=customer_id,
                         blob_name=file_path_to_read
                     )
 
@@ -423,7 +365,8 @@ async def process_template_generation(generation_id: str, request: TemplateGener
         filled_content = await fill_template_with_llm(
             template_file_path=template_file_path,
             source_files_content=source_files_content,
-            template_metadata=template_metadata
+            template_metadata=template_metadata,
+            customer_id=customer_id
         )
         
         # Step 5: Create output document in temp location
@@ -471,7 +414,7 @@ async def process_template_generation(generation_id: str, request: TemplateGener
         blob_service = await get_async_blob_service(base_folder="Projects")
         
         # Reuse the existing _process_file function
-        collection_name = f"customer_{CUSTOMER_ID}_documents"
+        collection_name = get_collection_name("documents", customer_id)
         
         # Call the same function used in upload endpoint
         process_result = await _process_file(
@@ -479,7 +422,8 @@ async def process_template_generation(generation_id: str, request: TemplateGener
             blob_service=blob_service,
             target_project=request.project_name,
             target_path=normalized_target_path,
-            collection_name=collection_name
+            collection_name=collection_name,
+            customer_id=customer_id
         )
         
         # Clean up temp file

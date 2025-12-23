@@ -60,20 +60,20 @@ def get_content_type(filename: str) -> str:
     content_type, _ = mimetypes.guess_type(filename)
     return content_type or "application/octet-stream"
 
-def get_collection_name(collection_type: Literal["documents", "templates"]) -> str:
+def get_collection_name(collection_type: Literal["documents", "templates", "conversations"], customer_id: str) -> str:
     """
     Get the full collection name based on collection type
     
     Args:
-        collection_type: Either "documents" or "templates"
+        collection_type: Either "documents", "templates", or "conversations"
         
     Returns:
         Full collection name with customer prefix
     """
-    if collection_type not in ["documents", "templates"]:
-        raise ValueError(f"Invalid collection type: {collection_type}. Must be 'documents' or 'templates'")
+    if collection_type not in ["documents", "templates", "conversations"]:
+        raise ValueError(f"Invalid collection type: {collection_type}. Must be 'documents', 'templates', or 'conversations'")
     
-    return f"customer_{CUSTOMER_ID}_{collection_type}"
+    return f"customer_{customer_id}_{collection_type}"
 
 def normalize_vector(vector: List[float]) -> List[float]:
     """Normalize vector for cosine similarity"""

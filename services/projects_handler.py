@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from config import CUSTOMER_ID
 from db.qdrant_service import get_qdrant_client
+from services.utils import get_collection_name
 
 logger = logging.getLogger(__name__)
 
@@ -179,13 +180,13 @@ class ProjectsHandler:
 # Global instance
 projects_handler = ProjectsHandler()
 
-async def get_project_file(file_id: str) -> Optional[Dict[str, Any]]:
+async def get_project_file(file_id: str, customer_id: str) -> Optional[Dict[str, Any]]:
     """
     Retrieve file metadata from Qdrant documents collection by file ID
     """
     try:
         qdrant_client = get_qdrant_client()
-        collection_name = f"customer_{CUSTOMER_ID}_documents"
+        collection_name = get_collection_name("documents", customer_id)
         
         # Search for any point with this file_id to get the file metadata
         points, _ = qdrant_client.scroll(

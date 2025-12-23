@@ -10,13 +10,12 @@ from qdrant_client.models import Distance, VectorParams, PointStruct
 from db.qdrant_service import get_qdrant_client, get_qdrant_client_async
 from services.azure_blob_service_async import get_async_blob_service
 from services.templates_utilitis import classify_document_type, count_placeholders, extract_key_topics, find_completion_points, identify_sections
-from services.utils import extract_text_from_bytes, extract_text_from_file, validate_file_type
+from services.utils import extract_text_from_bytes, extract_text_from_file, get_collection_name, validate_file_type
 
 logger = logging.getLogger(__name__)
 
 # Configuration
 TEMPLATES_BASE_DIR = "Templates"
-CUSTOMER_ID = 1  # Your customer ID
 
 # async def upload_template_files(
 #     files: List[UploadFile],
@@ -136,9 +135,9 @@ CUSTOMER_ID = 1  # Your customer ID
 
 async def upload_template_files(
     files: List[UploadFile],
+    customer_id: str,
     target_path: str = "",
-    category: str = "",
-    customer_id: str = "1"
+    category: str = ""
 ) -> dict:
     """
     Upload template files to Azure Blob Storage
@@ -154,7 +153,7 @@ async def upload_template_files(
     
     # Get Qdrant client
     qdrant_client = get_qdrant_client()
-    collection_name = f"customer_{customer_id}_templates"
+    collection_name = get_collection_name("templates", customer_id)
     
     # Ensure collection exists
     await ensure_templates_collection(qdrant_client, collection_name)
@@ -561,13 +560,13 @@ async def save_template_metadata_to_qdrant(
         print(f"🔍 Stack trace: {traceback.format_exc()}")
         return None
     
-async def get_template_metadata(file_id: str) -> Optional[Dict[str, Any]]:
+async def get_template_metadata(file_id: str, customer_id: str) -> Optional[Dict[str, Any]]:
     """
     Retrieve template metadata from Qdrant by file ID asynchronously
     """
     try:
         qdrant_client = await get_qdrant_client_async()  # Use async version
-        collection_name = f"customer_{CUSTOMER_ID}_templates"
+        collection_name = get_collection_name("templates", customer_id)
         
         # Run synchronous Qdrant scroll in thread pool
         loop = asyncio.get_event_loop()
@@ -598,7 +597,7 @@ async def get_template_metadata(file_id: str) -> Optional[Dict[str, Any]]:
         print(f"❌ Error loading metadata for {file_id}: {e}")
         return None
 
-async def update_template_usage(file_id: str):
+''' async def update_template_usage(file_id: str):
     """
     Update template usage statistics in Qdrant
     """
@@ -634,99 +633,9 @@ async def update_template_usage(file_id: str):
         
     except Exception as e:
         print(f"❌ Error updating usage for {file_id}: {e}")
-        return False
+        return False '''
 
-async def list_all_templates_metadata(
-    category: str = "",
-    document_type: str = "",
-    complexity: str = ""
-) -> List[Dict[str, Any]]:
-    """
-    List all templates with their metadata from Qdrant with filtering
-    """
-    try:
-        qdrant_client = get_qdrant_client()
-        collection_name = f"customer_{CUSTOMER_ID}_templates"
-        
-        # Scroll through all points in the collection
-        points, next_page = qdrant_client.scroll(
-            collection_name=collection_name,
-            limit=1000,  # Adjust based on your needs
-            with_payload=True,
-            with_vectors=False  # We don't need vectors
-        )
-        
-        all_metadata = []
-        
-        for point in points:
-            metadata = point.payload
-            
-            # Apply filters
-            if category and metadata.get("target_path") != category:
-                continue
-                
-            if document_type and metadata.get("analysis", {}).get("document_type") != document_type:
-                continue
-                
-            if complexity and metadata.get("analysis", {}).get("estimated_complexity") != complexity:
-                continue
-            
-            all_metadata.append(metadata)
-        
-        # Sort by creation time (newest first)
-        all_metadata.sort(key=lambda x: x.get("created_time", ""), reverse=True)
-        
-        return all_metadata
-        
-    except Exception as e:
-        print(f"❌ Error listing templates metadata: {e}")
-        return []
 
-async def search_templates(
-    query: str = "",
-    tags: List[str] = None,
-    document_type: str = ""
-) -> List[Dict[str, Any]]:
-    """
-    Search templates by various criteria
-    """
-    try:
-        qdrant_client = get_qdrant_client()
-        collection_name = f"customer_{CUSTOMER_ID}_templates"
-        
-        # Get all templates first (since we're not using vectors for search)
-        all_templates = await list_all_templates_metadata()
-        
-        filtered_templates = []
-        
-        for template in all_templates:
-            # Text search in filename and analysis
-            if query:
-                query_lower = query.lower()
-                filename_match = query_lower in template.get("original_filename", "").lower()
-                doc_type_match = query_lower in template.get("analysis", {}).get("document_type", "").lower()
-                topics_match = any(query_lower in topic.lower() for topic in template.get("analysis", {}).get("key_topics", []))
-                
-                if not (filename_match or doc_type_match or topics_match):
-                    continue
-            
-            # Tag filtering
-            if tags:
-                template_tags = template.get("tags", [])
-                if not all(tag in template_tags for tag in tags):
-                    continue
-            
-            # Document type filtering
-            if document_type and template.get("analysis", {}).get("document_type") != document_type:
-                continue
-            
-            filtered_templates.append(template)
-        
-        return filtered_templates
-        
-    except Exception as e:
-        print(f"❌ Error searching templates: {e}")
-        return []
 
 async def analyze_template_content(file_path: str, original_filename: str) -> dict:
     """
@@ -787,56 +696,7 @@ def normalize_template_path(path: str) -> str:
     
     return '/'.join(path_parts)
 
-async def get_template_categories() -> List[str]:
-    """
-    Get list of existing template categories from Qdrant
-    
-    Returns:
-        List of category names
-    """
-    try:
-        qdrant_client = get_qdrant_client()
-        collection_name = f"customer_{CUSTOMER_ID}_templates"
-        
-        # Scroll through all points to get unique categories
-        points, next_page = qdrant_client.scroll(
-            collection_name=collection_name,
-            limit=1000,
-            with_payload=True,
-            with_vectors=False
-        )
-        
-        categories = set()
-        for point in points:
-            payload = point.payload
-            category = payload.get("category", "")
-            if category:  # Only add non-empty categories
-                categories.add(category)
-        
-        # Also check filesystem for backward compatibility
-        if os.path.exists(TEMPLATES_BASE_DIR):
-            for item in os.listdir(TEMPLATES_BASE_DIR):
-                item_path = os.path.join(TEMPLATES_BASE_DIR, item)
-                if os.path.isdir(item_path):
-                    categories.add(item)
-        
-        return sorted(list(categories))
-        
-    except Exception as e:
-        print(f"❌ Error getting categories from Qdrant: {e}")
-        # Fallback to filesystem
-        if not os.path.exists(TEMPLATES_BASE_DIR):
-            return []
-        
-        categories = []
-        for item in os.listdir(TEMPLATES_BASE_DIR):
-            item_path = os.path.join(TEMPLATES_BASE_DIR, item)
-            if os.path.isdir(item_path):
-                categories.append(item)
-        
-        return sorted(categories)
-
-async def list_templates(category: str = "", target_path: str = "") -> List[dict]:
+async def list_templates(category: str, customer_id: str, target_path: str = "") -> List[dict]:
     """
     List all templates from Qdrant with optional filtering
     
@@ -849,7 +709,7 @@ async def list_templates(category: str = "", target_path: str = "") -> List[dict
     """
     try:
         qdrant_client = get_qdrant_client()
-        collection_name = f"customer_{CUSTOMER_ID}_templates"
+        collection_name = get_collection_name("templates", customer_id)
         
         # Scroll through all points
         points, next_page = qdrant_client.scroll(
@@ -1053,38 +913,3 @@ def generate_template_tags(analysis: Dict[str, Any], filename: str) -> List[str]
     # Remove any potential duplicates and return
     return list(set(tags))
 
-
-
-# Optional: Function to get all unique tags across templates
-async def get_all_template_tags(category: str = "") -> Dict[str, List[str]]:
-    """
-    Get all unique tags organized by tag type
-    """
-    all_templates = await list_all_templates_metadata(category)
-    
-    tag_categories = {
-        "type": set(),
-        "complexity": set(),
-        "topic": set(),
-        "placeholders": set(),
-        "completion": set(),
-        "format": set(),
-        "length": set(),
-        "sections": set(),
-        "status": set(),
-        "quality": set(),
-        "placeholder_type": set(),
-        "category": set(),
-        "purpose": set()
-    }
-    
-    for template in all_templates:
-        tags = template.get("tags", [])
-        for tag in tags:
-            if ':' in tag:
-                category, value = tag.split(':', 1)
-                if category in tag_categories:
-                    tag_categories[category].add(value)
-    
-    # Convert sets to sorted lists
-    return {category: sorted(values) for category, values in tag_categories.items()}

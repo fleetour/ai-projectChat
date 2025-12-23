@@ -13,133 +13,15 @@ from services.azure_blob_service_async import get_async_blob_service
 from services.embeddings_service import ensure_cosine_collection, get_embeddings_from_llama, save_embeddings_with_path
 from services.file_service import normalize_target_path
 from services.local_llma_service import LocalLlamaService
-from services.projects_handler import get_project_file, get_project_file_content
-from services.templates_service import TEMPLATES_BASE_DIR, get_template_metadata
-from services.utils import extract_text_from_bytes_async, extract_text_from_file, get_collection_name
+from services.utils import extract_text_from_bytes_async, get_collection_name
 
-# async def generate_filled_template(
-#     template_file_id: str,
-#     source_file_ids: List[str],
-#     project_name: str = None
-# ) -> Dict[str, Any]:
-#     """
-#     Generate a filled template by combining template structure with source file content
-    
-#     Args:
-#         template_file_id: ID of the template file in Qdrant (from templates collection)
-#         source_file_ids: List of source file IDs in Qdrant (from documents collection)
-#         project_name: Project name for organizing output files
-    
-#     Returns:
-#         Dictionary with generation results and file info
-#     """
-#     try:
-#         print(f"🔄 Starting template generation for template: {template_file_id}")
-#         print(f"   Source files: {source_file_ids}")
-#         print(f"   Project: {project_name}")
-        
-#         # Get template metadata and content (from templates collection)
-#         template_metadata = await get_template_metadata(template_file_id)
-#         if not template_metadata:
-#             raise ValueError(f"Template file not found: {template_file_id}")
-        
-#         template_path = template_metadata.get("file_path")
-#         if not os.path.exists(template_path):
-#             raise ValueError(f"Template file not found on disk: {template_path}")
-        
-#         # Get source files metadata and content (from documents collection)
-#         source_files_content = []
-#         for source_file_id in source_file_ids:
-#             # Try to get source file from documents collection first
-#             source_metadata = await get_project_file(source_file_id)
-            
-#             # If not found in documents collection, try templates collection as fallback
-#             if not source_metadata:
-#                 print(f"⚠️  Source file not found in documents collection: {source_file_id}, trying templates collection...")
-#                 source_metadata = await get_template_metadata(source_file_id)
-            
-#             if not source_metadata:
-#                 print(f"⚠️  Source file not found in any collection: {source_file_id}, skipping")
-#                 continue
-            
-#             # Try to get file path from different possible field names
-#             source_path = (
-#                 source_metadata.get("file_path") or 
-#                 source_metadata.get("full_file_path") or
-#                 source_metadata.get("relative_path")
-#             )
-            
-#             if source_path and os.path.exists(source_path):
-#                 content = extract_text_from_file(source_path)
-#                 source_files_content.append({
-#                     "filename": source_metadata.get("filename") or source_metadata.get("original_filename", "Unknown"),
-#                     "content": content,
-#                     "metadata": source_metadata
-#                 })
-#                 print(f"📄 Loaded source: {source_metadata.get('filename') or source_metadata.get('original_filename', 'Unknown')} ({len(content)} chars)")
-#             else:
-#                 print(f"⚠️  Source file not on disk: {source_path}")
-#                 # Try to get content from Qdrant chunks if file not on disk
-#                 content = await get_project_file_content(source_file_id)
-#                 if content:
-#                     source_files_content.append({
-#                         "filename": source_metadata.get("filename") or source_metadata.get("original_filename", "Unknown"),
-#                         "content": content,
-#                         "metadata": source_metadata
-#                     })
-#                     print(f"📄 Loaded source from Qdrant: {source_metadata.get('filename') or source_metadata.get('original_filename', 'Unknown')} ({len(content)} chars)")
-        
-#         if not source_files_content:
-#             raise ValueError("No valid source files found to process")
-        
-#         # Read template content
-#         template_content = extract_text_from_file(template_path)
-#         print(f"📋 Template content loaded: {len(template_content)} chars")
-        
-#         # Use LLM to fill the template
-#         filled_content = await fill_template_with_llm(
-#             template_content=template_content,
-#             source_files_content=source_files_content,
-#             template_metadata=template_metadata
-#         )
-        
-#         # Create the filled document
-#         output_file_info = await create_filled_document(
-#             filled_content=filled_content,
-#             template_metadata=template_metadata,
-#             source_files_metadata=[s["metadata"] for s in source_files_content],
-#             project_name=project_name
-#         )
-        
-#         print(f"✅ Template generation completed successfully")
-#         print(f"   Output file: {output_file_info['file_path']}")
-        
-#         return {
-#             "success": True,
-#             "template_file_id": template_file_id,
-#             "source_file_ids": source_file_ids,
-#             "output_file": output_file_info,
-#             "generated_at": datetime.now().isoformat(),
-#             "project_name": project_name
-#         }
-        
-#     except Exception as e:
-#         print(f"❌ Template generation failed: {e}")
-#         import traceback
-#         print(f"🔍 Stack trace: {traceback.format_exc()}")
-#         return {
-#             "success": False,
-#             "error": str(e),
-#             "template_file_id": template_file_id,
-#             "source_file_ids": source_file_ids,
-#             "generated_at": datetime.now().isoformat()
-#         }
     
     
 async def fill_template_with_llm(
     template_file_path: str,
     source_files_content: List[Dict[str, Any]],
     template_metadata: Dict[str, Any],
+    customer_id: str
 ) -> str:
     """
     Use LLM to fill the actual template file while preserving structure
@@ -147,12 +29,12 @@ async def fill_template_with_llm(
     # Read the actual template file content
     print(f"🔍 DEBUG: Reading template file from: {template_file_path}")
     
-    collection_name = get_collection_name('templates')
+    collection_name = get_collection_name('templates', customer_id)
     
     blob_service = await get_async_blob_service("Templates")
 
     file_content, blob_info = await blob_service.download_file(
-                    customer_id=CUSTOMER_ID,
+                    customer_id=customer_id,
                     blob_name=template_file_path
                 )
     

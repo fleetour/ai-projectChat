@@ -3,12 +3,13 @@ from datetime import datetime
 import io
 from pathlib import Path
 from typing import Literal
-from fastapi import APIRouter, Form, UploadFile, File, HTTPException, Response
+from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 import os
 import uuid
 import json
 import logging
+from fastapi.security import HTTPBearer
 import numpy as np
 
 from qdrant_client import models
@@ -16,25 +17,23 @@ import urllib
 
 from services.azure_blob_service_async import get_async_blob_service
 from services.conversation_service import AsyncConversationService, get_conversation_service
+from services.dependencies import get_current_user_id, get_customer_id
 from services.embeddings_service import (
     ensure_cosine_collection,
     get_embeddings_async,
     get_embeddings_from_llama,
     get_llama_chat_completion,
-    normalize_vector,
     save_embeddings_async,
-    save_embeddings_with_path,
 )
-from services.file_service import build_file_structure_tree, find_file_path_by_id, find_file_payload, intelligent_chunking_simple, intelligent_chunking_simple_async, normalize_target_path
+from services.file_service import  find_file_path_by_id, find_file_payload, intelligent_chunking_simple, intelligent_chunking_simple_async, normalize_target_path
 from db.qdrant_service import ensure_collection, ensure_collection_async, get_qdrant_client, search_similar
 from services.local_llma_service import LocalLlamaService
 from routes.schemas import QueryRequest
-from config import FILES_DIR, CUSTOMER_ID, VECTOR_SIZE
+from config import FILES_DIR, VECTOR_SIZE
 from services.utils import calculate_adaptive_top_k, extract_text_from_bytes, extract_text_from_bytes_async, extract_text_from_file, format_results_for_history, get_collection_name, get_content_type
 
 router = APIRouter(tags=["documents"])
 logger = logging.getLogger(__name__)
-
 
 
 
@@ -43,11 +42,11 @@ async def upload_files(
     target_project: str = Form(""),
     target_path: str = Form(""),
     files: list[UploadFile] = File(...),
+    customer_id: str = Depends(get_customer_id)
 ):
     """Async file upload function with Azure Blob Storage and parallel processing."""
     
-    collection_name = f"customer_{CUSTOMER_ID}_documents"
-    
+    collection_name = get_collection_name("documents", customer_id)
     if (not target_project) or target_project.strip() == "":
         raise HTTPException(status_code=400, detail="Target project must be specified")
 
@@ -72,7 +71,8 @@ async def upload_files(
                 blob_service=blob_service,
                 target_project=target_project,
                 target_path=target_path,
-                collection_name=collection_name
+                collection_name=collection_name,
+                customer_id=customer_id
             )
     
     # Create tasks for all files
@@ -98,7 +98,7 @@ async def upload_files(
         "uploaded": upload_results, 
         "targetPath": target_path, 
         "targetProject": target_project,
-        "container": f"customer_{CUSTOMER_ID}",
+        "container": f"customer_{customer_id}",
         "totalProcessed": len(files),
         "successful": len(upload_results),
         "failed": len(errors)
@@ -115,7 +115,8 @@ async def _process_file(
     blob_service,
     target_project: str,
     target_path: str,
-    collection_name: str
+    collection_name: str,
+    customer_id: str
 ) -> dict:
     """Process a single file asynchronously."""
     file_id = str(uuid.uuid4())
@@ -133,7 +134,7 @@ async def _process_file(
 
         # 2. Upload to Azure Blob (async)
         upload_result = await blob_service.upload_file(
-            customer_id=str(CUSTOMER_ID),
+            customer_id=str(customer_id),
             file_content=content,
             filename=file.filename,
             target_path=target_path,
@@ -151,7 +152,7 @@ async def _process_file(
         if not text or len(text.strip()) < 10:
             # Delete from Azure if no text
             try:
-                await blob_service.delete_file(str(CUSTOMER_ID), upload_result["blob_name"])
+                await blob_service.delete_file(str(customer_id), upload_result["blob_name"])
             except Exception as delete_error:
                 logger.warning(f"Failed to delete blob: {delete_error}")
             
@@ -166,7 +167,7 @@ async def _process_file(
         
         if not chunks:
             try:
-                await blob_service.delete_file(str(CUSTOMER_ID), upload_result["blob_name"])
+                await blob_service.delete_file(str(customer_id), upload_result["blob_name"])
             except Exception as delete_error:
                 logger.warning(f"Failed to delete blob: {delete_error}")
             
@@ -188,7 +189,7 @@ async def _process_file(
             if not batch_embeddings:
                 # Clean up Azure blob
                 try:
-                    await blob_service.delete_file(str(CUSTOMER_ID), upload_result["blob_name"])
+                    await blob_service.delete_file(str(customer_id), upload_result["blob_name"])
                 except:
                     pass
                 return {"error": f"Embedding batch {i//batch_size + 1} failed"}
@@ -225,7 +226,7 @@ async def _process_file(
         if not save_success:
             # Clean up Azure blob if Qdrant save failed
             try:
-                await blob_service.delete_file(str(CUSTOMER_ID), upload_result["blob_name"])
+                await blob_service.delete_file(str(customer_id), upload_result["blob_name"])
             except:
                 pass
             return {"error": "Failed to save embeddings to database"}
@@ -249,30 +250,33 @@ async def _process_file(
 
 
 
-@router.post("/query")
-async def query_docs(request: QueryRequest):
-    collection_name = f"customer_{CUSTOMER_ID}_documents"
-    try:
-        query_emb = get_embeddings_from_llama([request.query], request.model)[0]
-        results = search_similar(collection_name, query_emb, request.fileIds, request.top_k)
-        top_chunks = [r.payload["text"] for r in results]
-        context = "\n\n".join(top_chunks)
-        prompt = f"Answer the question based on the following text:\n\n{context}\n\nQuestion: {request.query}\nAnswer:"
-        logger.info(f"Query: {request.query}, Found {len(results)} relevant chunks")
-        answer = await get_llama_chat_completion(prompt, request.model)
-        formatted_results = [
-            {"file_id": r.payload["file_id"], "filename": r.payload["filename"], "score": r.score, "text": r.payload["text"]}
-            for r in results
-        ]
-        return JSONResponse(content={"answer": answer, "sources": formatted_results, "question": request.query})
-    except Exception as e:
-        logger.error(f"Error in query processing: {e}")
-        return JSONResponse(content={"error": f"Failed to process query: {str(e)}"}, status_code=500)
+# @router.post("/query")
+# async def query_docs(request: QueryRequest):
+#     collection_name = f"customer_{CUSTOMER_ID}_documents"
+#     try:
+#         query_emb = get_embeddings_from_llama([request.query], request.model)[0]
+#         results = search_similar(collection_name, query_emb, request.fileIds, request.top_k)
+#         top_chunks = [r.payload["text"] for r in results]
+#         context = "\n\n".join(top_chunks)
+#         prompt = f"Answer the question based on the following text:\n\n{context}\n\nQuestion: {request.query}\nAnswer:"
+#         logger.info(f"Query: {request.query}, Found {len(results)} relevant chunks")
+#         answer = await get_llama_chat_completion(prompt, request.model)
+#         formatted_results = [
+#             {"file_id": r.payload["file_id"], "filename": r.payload["filename"], "score": r.score, "text": r.payload["text"]}
+#             for r in results
+#         ]
+#         return JSONResponse(content={"answer": answer, "sources": formatted_results, "question": request.query})
+#     except Exception as e:
+#         logger.error(f"Error in query processing: {e}")
+#         return JSONResponse(content={"error": f"Failed to process query: {str(e)}"}, status_code=500)
 
 
 @router.post("/query-stream")
-async def query_docs_stream(request: QueryRequest, response: Response):
-    collection_name = f"customer_{CUSTOMER_ID}_documents"
+async def query_docs_stream(request: QueryRequest, 
+                            response: Response,  
+                            customer_id: str = Depends(get_customer_id),
+                            user_id: str = Depends(get_current_user_id)):
+    collection_name = get_collection_name("documents", customer_id)
 
     async def generate():
         conversation_id = None
@@ -282,8 +286,7 @@ async def query_docs_stream(request: QueryRequest, response: Response):
             
             # Get conversation ID from request or generate
             conversation_id = getattr(request, 'conversation_id', None)
-            user_id = getattr(request, 'user_id', 'anonymous')
-            
+           
             if not conversation_id:
                 conversation_id = str(uuid.uuid4())
                 # Notify client of new conversation
@@ -299,6 +302,8 @@ async def query_docs_stream(request: QueryRequest, response: Response):
             await conv_service.add_message(
                 conversation_id=conversation_id,
                 role="user",
+                user_id=user_id,
+                customer_id=customer_id,
                 content=request.query,
                 metadata={
                     "project": request.project_name,
@@ -339,6 +344,8 @@ async def query_docs_stream(request: QueryRequest, response: Response):
             await conv_service.add_message(
                 conversation_id=conversation_id,
                 role="assistant",
+                user_id=user_id,
+                customer_id=customer_id,
                 content=full_answer,
                 metadata={
                     "sources": [
@@ -407,14 +414,15 @@ async def query_docs_stream(request: QueryRequest, response: Response):
 @router.get("/download/{collection_type}/{file_id}")
 async def download_file(
     collection_type: Literal["documents", "templates"],
-    file_id: str
+    file_id: str,
+    customer_id: str = Depends(get_customer_id),
 ):
     """
     Download a file by its file_id from Azure Blob Storage
     """
     try:
         # Get the full collection name
-        collection_name = get_collection_name(collection_type)
+        collection_name = get_collection_name(collection_type, customer_id)
         
         print(f"🔍 Searching for file {file_id} in collection: {collection_name}")
         
@@ -449,7 +457,7 @@ async def download_file(
         # 4. Download file from Azure Blob
         try:
             file_content, blob_info = await blob_service.download_file(
-                customer_id=CUSTOMER_ID,
+                customer_id=customer_id,
                 blob_name=blob_name
             )
             
@@ -466,7 +474,7 @@ async def download_file(
             else:
                 safe_filename = f"file_{file_id}"
             
-            print(f"✅ Downloaded: {download_filename}, size: {len(file_content)} bytes")
+            #print(f"✅ Downloaded: {download_filename}, size: {len(file_content)} bytes")
             
             # 5. Return file as StreamingResponse
             return StreamingResponse(
@@ -499,209 +507,16 @@ async def download_file(
             detail=f"Failed to download file: {str(e)}"
         )
 
-@router.get("/download/{collection_type}/{file_id}")
-async def download_file(
-    collection_type: Literal["documents", "templates"],
-    file_id: str
-):
-    """
-    Download a file by its file_id from specified collection type
-    
-    Args:
-        collection_type: Either "documents" or "templates" (required)
-        file_id: The ID of the file to download
-    """
-    # Get the full collection name
-    collection_name = get_collection_name(collection_type)
-    
-    print(f"🔍 Searching for file {file_id} in collection: {collection_name}")
-    
-    # Find file path
-    file_path = await find_file_path_by_id(collection_name, file_id)
-    
-    # Get file info
-    filename = os.path.basename(file_path)
-    file_size = os.path.getsize(file_path)
-    
-    # Determine content type
-    content_type = get_content_type(filename)
-    
-    print(f"✅ Found file: {filename} at path: {file_path}")
-    
-    # Return the file
-    return FileResponse(
-        path=file_path,
-        filename=filename,
-        media_type=content_type,
-        headers={
-            "Content-Disposition": f"attachment; filename={filename}",
-            "Content-Length": str(file_size)
-        }
-    )
 
-@router.get("/stream/{collection_type}/{file_id}")
-async def download_file_stream(
-    collection_type: Literal["documents", "templates"],
-    file_id: str
-):
-    """
-    Stream download a file by its file_id
-    Useful for large files
-    """
-    # Get the full collection name
-    collection_name = get_collection_name(collection_type)
-    
-    # Find file path
-    file_path = await find_file_path_by_id(collection_name, file_id)
-    filename = os.path.basename(file_path)
-    
-    # Stream the file
-    def iterfile():
-        with open(file_path, mode="rb") as file_like:
-            yield from file_like
-    
-    content_type = get_content_type(filename)
-    
-    return Response(
-        iterfile(),
-        media_type=content_type,
-        headers={
-            "Content-Disposition": f"attachment; filename={filename}"
-        }
-    )
 
-@router.get("/info/{collection_type}/{file_id}")
-async def get_file_info(
-    collection_type: Literal["documents", "templates"],
-    file_id: str
-):
-    """
-    Get file information without downloading
-    """
-    # Get the full collection name
-    collection_name = get_collection_name(collection_type)
-    
-    try:
-        client = get_qdrant_client()
-        
-        # Search for the file
-        scroll_result = client.scroll(
-            collection_name=collection_name,
-            scroll_filter={
-                "must": [
-                    {"key": "file_id", "match": {"value": file_id}}
-                ]
-            },
-            limit=1,
-            with_payload=True,
-            with_vectors=False
-        )
-        
-        if not scroll_result[0]:
-            raise HTTPException(
-                status_code=404,
-                detail=f"File with ID {file_id} not found in collection {collection_name}"
-            )
-        
-        point = scroll_result[0][0]
-        payload = point.payload
-        
-        # Get file path
-        file_path = await find_file_path_by_id(collection_name, file_id)
-        
-        # Get file stats
-        file_exists = os.path.exists(file_path)
-        file_stats = {}
-        
-        if file_exists:
-            stat_info = os.stat(file_path)
-            import datetime
-            file_stats = {
-                "size": stat_info.st_size,
-                "created": datetime.datetime.fromtimestamp(stat_info.st_ctime).isoformat(),
-                "modified": datetime.datetime.fromtimestamp(stat_info.st_mtime).isoformat(),
-                "exists": True
-            }
-        else:
-            file_stats = {"exists": False}
-        
-        # Extract filename from payload or file path
-        filename = payload.get("filename") or os.path.basename(file_path)
-        
-        return {
-            "file_id": file_id,
-            "filename": filename,
-            "collection_type": collection_type,
-            "collection_name": collection_name,
-            "file_path": file_path,
-            "file_exists": file_exists,
-            "stats": file_stats,
-            "metadata": {
-                "upload_path": payload.get("upload_path"),
-                "project": payload.get("project"),
-                "upload_date": payload.get("upload_time"),
-                "total_chunks": payload.get("total_chunks", 0),
-                "auto_generated": payload.get("auto_generated", False),
-                "source_template_id": payload.get("source_template_id"),
-                "category": payload.get("category")
-            }
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error getting file info: {str(e)}"
-        )
+
 
 @router.get("/health")
-async def health_check():
+async def health_check(customer_id: str = Depends(get_customer_id)):
     try:
-        collection_name = f"customer_{CUSTOMER_ID}_documents"
+        collection_name = f"customer_{customer_id}_documents"
         ensure_collection(collection_name, vector_size=VECTOR_SIZE)
         return {"status": "healthy", "qdrant": "connected", "llama": "available"}
     except Exception as e:
         return {"status": "unhealthy", "qdrant": "error", "llama": "error", "error": str(e)}
 
-
-@router.get("/diagnose-collection")
-async def diagnose_collection():
-    collection_name = f"customer_{CUSTOMER_ID}_documents"
-    qdrant_client = get_qdrant_client()
-    diagnostics = {}
-    try:
-        collection_info = qdrant_client.get_collection(collection_name=collection_name)
-        diagnostics["collection_info"] = {
-            "status": collection_info.status,
-            "points_count": collection_info.points_count,
-            "vectors_count": collection_info.vectors_count,
-            "distance": str(collection_info.config.params.vectors.distance),
-            "vector_size": collection_info.config.params.vectors.size,
-        }
-        points, _ = qdrant_client.scroll(collection_name=collection_name, limit=10, with_payload=True, with_vectors=True)
-        diagnostics["sample_points"] = []
-        for point in points:
-            point_info = {
-                "id": point.id,
-                "has_vector": point.vector is not None,
-                "vector_length": len(point.vector) if point.vector else 0,
-                "vector_norm": float(np.linalg.norm(point.vector)) if point.vector else 0,
-                "payload": {
-                    "filename": point.payload.get("filename"),
-                    "project": point.payload.get("project"),
-                    "file_id": point.payload.get("file_id"),
-                },
-            }
-            diagnostics["sample_points"].append(point_info)
-
-        if points and points[0].vector:
-            test_vector = points[0].vector
-            search_results = qdrant_client.search(collection_name=collection_name, query_vector=test_vector, limit=5, with_payload=True)
-            diagnostics["test_search"] = [
-                {"score": float(result.score), "id": result.id, "filename": result.payload.get("filename")} for result in search_results
-            ]
-
-        return diagnostics
-    except Exception as e:
-        return {"error": str(e)}

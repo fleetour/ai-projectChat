@@ -8,42 +8,24 @@ class QueryRequest(BaseModel):
     project_name: Optional[str] = None
     top_k: int = 5
     model: str
-    user_id: Optional[str] = None 
     conversation_id: Optional[str] = None  
 
 class UploadRequest(BaseModel):
     target_path: Optional[str] = ""
 
 
-class ProjectInfo(BaseModel):
-    name: str
-    path: str
-    created_at: Optional[str] = None
-    modified_at: Optional[str] = None
-    file_count: int = 0
-    size: int = 0
-
-
-class ProjectResponse(BaseModel):
-    projects: List[ProjectInfo]
-
-
-class CreateProjectRequest(BaseModel):
-    name: str
-
-
-class CreateProjectResponse(BaseModel):
-    success: bool
-    project: Optional[ProjectInfo] = None
-    message: str = ""
-
-
-class DeleteProjectResponse(BaseModel):
-    success: bool
-    message: str = ""
-
-
 # Pydantic model for title update
 class UpdateTitleRequest(BaseModel):
     new_title: str
-    user_id: str
+
+class ConversationResponse(BaseModel):
+    id: str
+    title: str
+    created_at: str
+    updated_at: str
+    message_count: int
+    last_message: str
+
+class ConversationsListResponse(BaseModel):
+    conversations: List[ConversationResponse]
+    count: int
