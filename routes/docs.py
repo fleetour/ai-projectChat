@@ -312,7 +312,7 @@ async def query_docs_stream(request: QueryRequest,
                 }
             )
             # Get recent history for context
-            history_messages = await conv_service.get_recent_history(conversation_id, max_messages=3)
+            history_messages = await conv_service.get_recent_history(conversation_id, user_id, customer_id, max_messages=3)
             conversation_history = "\n".join(history_messages) if history_messages else ""
          
             adaptive_top_k = calculate_adaptive_top_k(request.query)
@@ -379,7 +379,7 @@ async def query_docs_stream(request: QueryRequest,
             yield f"data: {json.dumps(sources_data)}\n\n"
             
             # Send completion with conversation info
-            conversation = await conv_service.get_conversation(conversation_id)
+            conversation = await conv_service.get_conversation(conversation_id, user_id, customer_id)
             yield f"data: {json.dumps({
                 'type': 'done', 
                 'content': full_answer,

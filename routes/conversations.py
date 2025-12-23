@@ -117,38 +117,3 @@ async def get_conversation_details(conversation_id: str,
 
 
 
-@router.post("/conversations/summarize/{conversation_id}")
-async def summarize_conversation(conversation_id: str):
-    """Create a summary of a long conversation."""
-    conv_service = ConversationService(get_qdrant_client())
-    conversation = await conv_service.get_conversation(conversation_id)
-    
-    if len(conversation["messages"]) < 10:
-        return {"message": "Conversation too short to summarize"}
-    
-    # Create summary prompt
-    messages_text = "\n".join([
-        f"{msg['role']}: {msg['content'][:200]}..."
-        for msg in conversation["messages"][-15:]  # Last 15 messages
-    ])
-    
-    summary_prompt = f"""Please summarize this conversation in 2-3 sentences:
-
-{messages_text}
-
-Summary:"""
-    
-    # Get summary from LLM
-    local_llama = LocalLlamaService()
-    summary = ""
-    async for chunk in local_llama.get_llama_stream_completion(summary_prompt, context=""):
-        summary += chunk
-    
-    # Add summary to conversation metadata
-    conversation["summary"] = summary.strip()
-    
-    return {
-        "conversation_id": conversation_id,
-        "summary": summary,
-        "message_count": len(conversation["messages"])
-    }

@@ -415,9 +415,9 @@ class AsyncConversationService:
         
         return title if title and len(title) > 5 else ""
     
-    async def get_recent_history(self, conversation_id: str, max_messages: int = 5) -> List[str]:
+    async def get_recent_history(self, conversation_id: str, user_id: str, customer_id: str, max_messages: int = 5) -> List[str]:
         """Get recent conversation history for context."""
-        conversation = await self.get_conversation(conversation_id)
+        conversation = await self.get_conversation(conversation_id, user_id, customer_id)
         
         if not conversation["messages"]:
             return []
