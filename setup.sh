@@ -15,7 +15,10 @@ source venv/bin/activate
 pip install --upgrade pip
 
 # install dependencies
-pip install fastapi uvicorn requests faiss-cpu python-docx pdfminer.six pillow pytesseract
+#pip install fastapi uvicorn requests faiss-cpu python-docx pdfminer.six pillow pytesseract
+
+# Install requirements
+pip install -r requirements.txt
 
 echo "✅ Setup complete. You can now run ./run.sh to start the server."
 

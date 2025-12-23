@@ -6,3 +6,11 @@ python-docx
 pdfminer.six
 pillow
 pytesseract
+qdrant-client
+dotenv
+ollama
+aiohttp
+azure-storage-blob
+jwt
+PyJWT
+cryptography
