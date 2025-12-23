@@ -363,6 +363,13 @@ async def query_docs_stream(request: QueryRequest,
                     'conversation_id': conversation_id  # Include in content chunks
                 })}\n\n"
 
+            all_results_sorted = []
+            for project_name, project_results in grouped_results.items():
+                for result in project_results:
+                    all_results_sorted.append((result.score, result, project_name))
+
+            # Sort by score descending
+            all_results_sorted.sort(key=lambda x: x[0], reverse=True)
             # Add assistant response
             await conv_service.add_message(
                 conversation_id=conversation_id,
@@ -370,37 +377,64 @@ async def query_docs_stream(request: QueryRequest,
                 user_id=user_id,
                 customer_id=customer_id,
                 content=full_answer,
-                metadata={
+                metadata = {
                     "sources": [
                         {
-                            "file_id": r.payload.get("file_id"),
-                            "filename": r.payload.get("filename"),
-                            "score": float(r.score)
+                            "file_id": result.payload.get("file_id"),
+                            "filename": result.payload.get("filename"),
+                            "project": project_name,  # Include project name
+                            "score": float(score)
                         }
-                        for r in results[:3]
+                        for score, result, project_name in all_results_sorted[:3]
                     ]
                 }
             )
 
             formatted_results = []
-            for r in results:
-                formatted_result = {
-                    "file_id": str(r.payload.get("file_id", "")),
-                    "filename": str(r.payload.get("filename", "")),
-                    "project_name": str(r.payload.get("project_name", "")),
-                    "score": round(float(r.score), 6),
-                    "text": str(r.payload.get("text", ""))[:500] + "..." if len(r.payload.get("text", "")) > 500 else str(r.payload.get("text", "")),
-                }
-                formatted_results.append(formatted_result)
 
-            # Send sources with conversation_id
+            # Flatten and take top N results
+            all_results = []
+            for project_name, project_results in grouped_results.items():
+                # Check if project_results is not empty
+                if project_results:
+                    all_results.extend([(r, project_name) for r in project_results])
+
+            # Sort by score if we have results
+            if all_results:
+                all_results.sort(key=lambda x: x[0].score, reverse=True)
+                
+                # Format top results (max 10)
+                for r, project_name in all_results[:10]:
+                    # Get text safely
+                    text = r.payload.get("text", "")
+                    text_str = str(text) if text else ""
+                    
+                    # Truncate if needed
+                    if len(text_str) > 500:
+                        truncated_text = text_str[:500] + "..."
+                    else:
+                        truncated_text = text_str
+                    
+                    formatted_result = {
+                        "file_id": str(r.payload.get("file_id", "")),
+                        "filename": str(r.payload.get("filename", "")),
+                        "project_name": str(project_name),
+                        "score": round(float(r.score), 6),
+                        "text": truncated_text,
+                    }
+                    formatted_results.append(formatted_result)
+            else:
+                # Handle case with no results
+                logger.warning("No results found in grouped_results")
+
+            # Send sources
             sources_data = {
                 "type": "sources", 
                 "sources": formatted_results,
                 "conversation_id": conversation_id
             }
             yield f"data: {json.dumps(sources_data)}\n\n"
-            
+                    
             # Send completion with conversation info
             conversation = await conv_service.get_conversation(conversation_id, user_id, customer_id)
             yield f"data: {json.dumps({
@@ -409,7 +443,7 @@ async def query_docs_stream(request: QueryRequest,
                 'conversation_id': conversation_id,
                 'history_length': len(conversation.get("messages", []))
             })}\n\n"
-            
+                    
         except Exception as e:
             error_msg = f"Error in stream processing: {str(e)}"
             logger.error(error_msg, exc_info=True)
