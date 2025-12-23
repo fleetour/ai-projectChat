@@ -8,7 +8,7 @@ from db.qdrant_service import get_qdrant_client
 from routes.schemas import ConversationsListResponse, UpdateTitleRequest
 from services.conversation_service import AsyncConversationService, get_conversation_service
 from services.dependencies import get_current_user_id, get_customer_id
-from services.local_llma_service import LocalLlamaService
+
 
 
 router = APIRouter(tags=["conversations"])

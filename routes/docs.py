@@ -26,8 +26,8 @@ from services.embeddings_service import (
     save_embeddings_async,
 )
 from services.file_service import  find_file_path_by_id, find_file_payload, intelligent_chunking_simple, intelligent_chunking_simple_async, normalize_target_path
-from db.qdrant_service import ensure_collection, ensure_collection_async, get_qdrant_client, search_similar
-from services.local_llma_service import LocalLlamaService
+from db.qdrant_service import ensure_collection, ensure_collection_async, get_qdrant_client, search_similar, search_similar_with_project_grouping
+from services.local_llma_service import LlmService
 from routes.schemas import QueryRequest
 from config import FILES_DIR, VECTOR_SIZE
 from services.utils import calculate_adaptive_top_k, extract_text_from_bytes, extract_text_from_bytes_async, extract_text_from_file, format_results_for_history, get_collection_name, get_content_type
@@ -319,19 +319,42 @@ async def query_docs_stream(request: QueryRequest,
             effective_top_k = max(request.top_k, adaptive_top_k)
             
             query_emb = get_embeddings_from_llama([request.query], request.model)[0]
-            results = search_similar(collection_name, query_emb, request.fileIds, request.project_name, effective_top_k)
-       
-            top_chunks = [r.payload["text"] for r in results]
-            context = "\n\n".join(top_chunks)
-            
-            local_llama = LocalLlamaService(model=request.model)
+    
+            grouped_results = search_similar_with_project_grouping(collection_name, query_emb, request.fileIds, request.project_name, effective_top_k)
+            print(f"🔍 Found results in projects: {list(grouped_results.keys())}")
+           # top_chunks = [r.payload["text"] for r in results]
+
+            #context = "\n\n".join(top_chunks)
+            context_parts = []
+            for project_name, results in grouped_results.items():
+                # Add project header
+                context_parts.append(f"## Information from Project: {project_name}")
+                
+                # Add top chunks from this project
+                top_chunks_from_project = [r.payload["text"] for r in results[:3]]  # Top 3 per project
+                for i, chunk in enumerate(top_chunks_from_project, 1):
+                    context_parts.append(f"{i}. {chunk}")
+                
+                context_parts.append("")  # Empty line between projects
+
+            context = "\n".join(context_parts)
+            context_description = """
+**CRITICAL: Project Attribution Rules:**
+1. When citing information, ALWAYS mention which project it comes from
+2. Format: "Based on Project [Project Name]..."
+3. If comparing across projects, say "Project A has X, while Project B has Y"
+4. If the user asks about a specific project, focus on that project's information
+"""
+
+            local_llama = LlmService()
             full_answer = ""
             
             # Stream response with conversation_id in each chunk
             async for chunk in local_llama.get_llama_stream_completion(
                 question=request.query,
                 context=context,
-                conversation_history=conversation_history
+                conversation_history=conversation_history,
+                context_description=context_description
             ):
                 full_answer += chunk
                 yield f"data: {json.dumps({

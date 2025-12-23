@@ -13,7 +13,7 @@ from qdrant_client.models import PointStruct
 import numpy as np
 import logging
 from db.qdrant_service import get_qdrant_client
-from services.local_llma_service import LocalLlamaService
+from services.local_llma_service import LlmService
 from services.utils import normalize_vector
 
 load_dotenv()
@@ -94,14 +94,14 @@ def get_embeddings_from_llama(texts: List[str], model: str = "mistral:7b") -> Li
 
     if not model.strip():
         raise Exception(f"Model must be defined.")
-    local_llama = LocalLlamaService(model=model)
+    local_llama = LlmService()
     return local_llama.get_embeddings(texts)
 
 async def get_llama_chat_completion(prompt: str, model: str) -> str:
     """Get chat completion using local Llama"""
     if not model.strip():
         raise Exception(f"Model must be defined.")
-    local_llama = LocalLlamaService(model=model)
+    local_llama = LlmService()
     return await local_llama.get_chat_completion(prompt)
 
 def ensure_cosine_collection(qdrant_client: QdrantClient, collection_name: str, vector_size: int = 4096):

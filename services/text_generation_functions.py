@@ -12,7 +12,7 @@ from db.qdrant_service import get_qdrant_client
 from services.azure_blob_service_async import get_async_blob_service
 from services.embeddings_service import ensure_cosine_collection, get_embeddings_from_llama, save_embeddings_with_path
 from services.file_service import normalize_target_path
-from services.local_llma_service import LocalLlamaService
+from services.local_llma_service import LlmService, LocalLlamaService
 from services.utils import extract_text_from_bytes_async, get_collection_name
 
     
@@ -488,7 +488,7 @@ def extract_value_after_colon(line: str) -> str:
 
     
     # Global instance
-local_llama = LocalLlamaService()
+local_llama = LlmService()
 
 
 

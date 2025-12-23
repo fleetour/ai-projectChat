@@ -158,6 +158,52 @@ def save_embeddings(collection_name: str, file_id: str, filename: str, chunks: l
         logger.error(f"❌ Error saving embeddings to {collection_name}: {e}")
         raise
 
+
+def search_similar_with_project_grouping(collection_name: str, query_vector: list, 
+                                         file_ids: Optional[List[str]] = None, 
+                                         project_name: Optional[str] = None, 
+                                         top_k: int = 5):
+    """Search and group results by project."""
+    client = get_qdrant_client()
+    
+    # Build query filter (your existing logic)
+    query_filter = None
+    if file_ids and project_name:
+        query_filter = {
+            "should": [
+                {"key": "file_id", "match": {"any": file_ids}},
+                {"key": "project", "match": {"value": project_name}}
+            ]
+        }
+    elif file_ids:
+        query_filter = {"must": [{"key": "file_id", "match": {"any": file_ids}}]}
+    elif project_name:
+        query_filter = {"must": [{"key": "project", "match": {"value": project_name}}]}
+    
+    try:
+        results = client.search(
+            collection_name=collection_name,
+            query_vector=query_vector,
+            limit=top_k * 3,  # Get more results to group by project
+            query_filter=query_filter,
+            with_payload=True,
+        )
+        
+        # Group results by project
+        grouped_results = {}
+        for result in results:
+            project_id = result.payload.get("project") or "Unknown Project"
+            if project_id not in grouped_results:
+                grouped_results[project_id] = []
+            grouped_results[project_id].append(result)
+        
+        logger.info(f"✅ Search found {len(results)} results grouped into {len(grouped_results)} projects")
+        return grouped_results
+        
+    except Exception as e:
+        logger.error(f"❌ Error searching in {collection_name}: {e}")
+        raise
+
 def search_similar(collection_name: str, query_vector: list, file_ids: Optional[List[str]] = None, 
                    project_name: Optional[str] = None, top_k: int = 5):
     """Search in Qdrant collection."""
