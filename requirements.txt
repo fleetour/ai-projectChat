@@ -12,7 +12,6 @@ dotenv
 ollama
 aiohttp
 azure-storage-blob
-jwt
 PyJWT
 cryptography
 python-multipart
