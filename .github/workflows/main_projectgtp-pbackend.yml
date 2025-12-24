@@ -21,19 +21,18 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
-      - name: Log in to container registry
-        uses: docker/login-action@v2
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
         with:
-          registry: docker.io/
-          username: ${{ secrets.AZUREAPPSERVICE_CONTAINERUSERNAME_3AF9969C690A4EC9BF6BF874B6FE7CEA }}
-          password: ${{ secrets.AZUREAPPSERVICE_CONTAINERPASSWORD_5DB89516F4B14BBAB5E02CE968354885 }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push container image to registry
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          tags: docker.io/${{ secrets.AZUREAPPSERVICE_CONTAINERUSERNAME_3AF9969C690A4EC9BF6BF874B6FE7CEA }}/ai-projectchat:${{ github.sha }}
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/ai-projectchat:${{ github.sha }}
           file: ./Dockerfile
 
   deploy:
@@ -59,5 +58,5 @@ jobs:
         with:
           app-name: 'projectgtp-pbackend'
           slot-name: 'Production'
-          images: 'index.docker.io/${{ secrets.AZUREAPPSERVICE_CONTAINERUSERNAME_3AF9969C690A4EC9BF6BF874B6FE7CEA }}/fleetur/ai-projectchat:${{ github.sha }}'
+          images: 'docker.io/fleetur/ai-projectchat:${{ github.sha }}'
           
