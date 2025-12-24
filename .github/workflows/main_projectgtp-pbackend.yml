@@ -24,16 +24,16 @@ jobs:
       - name: Log in to container registry
         uses: docker/login-action@v2
         with:
-          registry: index.docker.io/
+          registry: docker.io/
           username: ${{ secrets.AZUREAPPSERVICE_CONTAINERUSERNAME_3AF9969C690A4EC9BF6BF874B6FE7CEA }}
           password: ${{ secrets.AZUREAPPSERVICE_CONTAINERPASSWORD_5DB89516F4B14BBAB5E02CE968354885 }}
 
       - name: Build and push container image to registry
-        uses: docker/build-push-action@v3
+        uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          tags: index.docker.io/${{ secrets.AZUREAPPSERVICE_CONTAINERUSERNAME_3AF9969C690A4EC9BF6BF874B6FE7CEA }}/ai-projectchat:${{ github.sha }}
+          tags: docker.io/${{ secrets.AZUREAPPSERVICE_CONTAINERUSERNAME_3AF9969C690A4EC9BF6BF874B6FE7CEA }}/ai-projectchat:${{ github.sha }}
           file: ./Dockerfile
 
   deploy:
