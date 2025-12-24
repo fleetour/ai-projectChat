@@ -291,8 +291,8 @@ async def query_docs_stream(request: QueryRequest,
                 conversation_id = str(uuid.uuid4())
                 # Notify client of new conversation
                 yield f"data: {json.dumps({
-                    "type": "conversation_created",
-                    "conversation_id": conversation_id
+                    'type': 'conversation_created',
+                    'conversation_id': conversation_id
                 })}\n\n"
             
             # Get conversation history
