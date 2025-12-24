@@ -1,7 +1,6 @@
 # dependencies.py
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jwt.exceptions import ExpiredSignatureError, DecodeError, InvalidSignatureError
 import jwt
 from typing import Optional, Dict
 import logging
@@ -24,18 +23,13 @@ def decode_jwt_token(token: str):
             audience="projects-gpt.api"
         )
         return payload
-    except ExpiredSignatureError:
-        logger.error("Token has expired")
+    except Exception as e:
+        logger.error(f"Token has expired or invalid: {e}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token has expired"
+            detail="Token has expired or invalid"
         )
-    except InvalidSignatureError as e:
-        logger.error(f"Invalid token: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token"
-        )
+    
     
 async def get_current_user_id(
     credentials: HTTPAuthorizationCredentials = Depends(security)
