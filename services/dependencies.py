@@ -1,7 +1,7 @@
 # dependencies.py
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-import jwt
+import jwt as pyjwt
 from typing import Optional, Dict
 import logging
 
@@ -16,7 +16,7 @@ from config import SECRET_KEY, ALGORITHM
 def decode_jwt_token(token: str):
     """Helper function to decode JWT token using PyJWT."""
     try:
-        payload = jwt.decode(
+        payload = pyjwt.decode(
             token, 
             SECRET_KEY, 
             algorithms=[ALGORITHM],
