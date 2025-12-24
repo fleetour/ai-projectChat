@@ -13,29 +13,29 @@
 #   IMAGE_NAME: fleetur/ai-projectchat
 
 # jobs:
- 
+
 #   docker-build-push:
 #     name: Build and Push Docker Image
 #     runs-on: ubuntu-latest
 #     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    
+
 #     permissions:
 #       contents: read
 #       packages: write
-    
+
 #     steps:
 #     - name: Checkout code
 #       uses: actions/checkout@v4
-    
+
 #     - name: Set up Docker Buildx
 #       uses: docker/setup-buildx-action@v3
-    
+
 #     - name: Log in to Docker Hub
 #       uses: docker/login-action@v3
 #       with:
 #         username: ${{ secrets.DOCKERHUB_USERNAME }}
 #         password: ${{ secrets.DOCKERHUB_TOKEN }}
-    
+
 #     - name: Extract metadata (tags, labels) for Docker
 #       id: meta
 #       uses: docker/metadata-action@v5
@@ -48,7 +48,7 @@
 #           type=semver,pattern={{major}}.{{minor}}
 #           type=sha,prefix={{branch}}-
 #           type=raw,value=latest,enable={{is_default_branch}}
-    
+
 #     - name: Build and push Docker image
 #       uses: docker/build-push-action@v5
 #       with:
@@ -59,7 +59,7 @@
 #         labels: ${{ steps.meta.outputs.labels }}
 #         cache-from: type=gha
 #         cache-to: type=gha,mode=max
-    
+
 #     # - name: Wait for image propagation
 #     #   run: sleep 30
 #     # - name: Scan image for vulnerabilities
@@ -69,7 +69,7 @@
 #     #     image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
 #     #     format: 'sarif'
 #     #     output: 'trivy-results.sarif'
-    
+
 #     # - name: Upload vulnerability scan results
 #     #   uses: github/codeql-action/upload-sarif@v3
 #     #   if: always()
@@ -81,11 +81,11 @@
 #     runs-on: ubuntu-latest
 #     needs: docker-build-push
 #     if: github.ref == 'refs/heads/main'
-    
+
 #     steps:
 #     - name: Checkout code
 #       uses: actions/checkout@v4
-    
+
 #     - name: Deploy to Azure Container Instances (Staging)
 #       env:
 #         AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
@@ -96,7 +96,7 @@
 #         az login --service-principal -u ${{ secrets.AZURE_CLIENT_ID }} \
 #           -p ${{ secrets.AZURE_CLIENT_SECRET }} \
 #           --tenant ${{ secrets.AZURE_TENANT_ID }}
-        
+
 #         az container create \
 #           --resource-group $RESOURCE_GROUP \
 #           --name $CONTAINER_NAME \
@@ -109,12 +109,12 @@
 #             REDIS_URL=${{ secrets.REDIS_URL_STAGING }} \
 #             LLM_API_KEY=${{ secrets.LLM_API_KEY }} \
 #           --dns-name-label $CONTAINER_NAME-$(date +%s)
-    
+
 #     - name: Run integration tests
 #       run: |
 #         # Wait for service to be ready
 #         sleep 30
-        
+
 #         # Run integration tests against staging
 #         curl -f http://$CONTAINER_NAME.azurecontainer.io:8000/api/health
 #         echo "Staging deployment successful!"
@@ -124,11 +124,11 @@
 #     runs-on: ubuntu-latest
 #     needs: docker-build-push
 #     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-    
+
 #     steps:
 #     - name: Checkout code
 #       uses: actions/checkout@v4
-    
+
 #     - name: Deploy to Azure Container Instances (Production)
 #       env:
 #         AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
@@ -139,16 +139,16 @@
 #         az login --service-principal -u ${{ secrets.AZURE_CLIENT_ID }} \
 #           -p ${{ secrets.AZURE_CLIENT_SECRET }} \
 #           --tenant ${{ secrets.AZURE_TENANT_ID }}
-        
+
 #         # Stop existing container if running
 #         az container stop \
 #           --resource-group $RESOURCE_GROUP \
 #           --name $CONTAINER_NAME || true
-        
+
 #         # Start new container with latest image
 #         az container start \
 #           --resource-group $RESOURCE_GROUP \
 #           --name $CONTAINER_NAME \
 #           --image ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-        
+
 #         echo "Production deployment initiated!"
