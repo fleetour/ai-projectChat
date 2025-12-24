@@ -34,6 +34,9 @@ jobs:
           push: true
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/ai-projectchat:${{ github.sha }}
           file: ./Dockerfile
+          cache-from: |
+          cache-to: |
+          no-cache: true
 
   deploy:
     runs-on: ubuntu-latest
