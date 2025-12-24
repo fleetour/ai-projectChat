@@ -271,200 +271,201 @@ async def _process_file(
 #         return JSONResponse(content={"error": f"Failed to process query: {str(e)}"}, status_code=500)
 
 
-# @router.post("/query-stream")
-# async def query_docs_stream(request: QueryRequest, 
-#                             response: Response,  
-#                             customer_id: str = Depends(get_customer_id),
-#                             user_id: str = Depends(get_current_user_id)):
-#     collection_name = get_collection_name("documents", customer_id)
+@router.post("/query-stream")
+async def query_docs_stream(request: QueryRequest, 
+                            response: Response,  
+                            customer_id: str = Depends(get_customer_id),
+                            user_id: str = Depends(get_current_user_id)):
+    collection_name = get_collection_name("documents", customer_id)
 
-#     async def generate():
-#         conversation_id = None
+    async def generate():
+        conversation_id = None
         
-#         try:
-#             print(f"🎯 STARTING QUERY STREAM: '{request.query}'")
+        try:
+            print(f"🎯 STARTING QUERY STREAM: '{request.query}'")
             
-#             # Get conversation ID from request or generate
-#             conversation_id = getattr(request, 'conversation_id', None)
+            # Get conversation ID from request or generate
+            conversation_id = getattr(request, 'conversation_id', None)
            
-#             if not conversation_id:
-#                 conversation_id = str(uuid.uuid4())
-#                 # Notify client of new conversation
-#                 yield f"data: {json.dumps({
-#                     'type': 'conversation_created',
-#                     'conversation_id': conversation_id
-#                 })}\n\n"
+            if not conversation_id:
+                conversation_id = str(uuid.uuid4())
+                # Notify client of new conversation
+                conversation_data = {
+                    'type': 'conversation_created',
+                    'conversation_id': conversation_id
+                }
+                yield f"data: {json.dumps(conversation_data)}\n\n"
             
-#             # Get conversation history
-#             conv_service = await get_conversation_service()
+            # Get conversation history
+            conv_service = await get_conversation_service()
        
-#             # Add user message
-#             await conv_service.add_message(
-#                 conversation_id=conversation_id,
-#                 role="user",
-#                 user_id=user_id,
-#                 customer_id=customer_id,
-#                 content=request.query,
-#                 metadata={
-#                     "project": request.project_name,
-#                     "files": request.fileIds,
-#                     "model": request.model
-#                 }
-#             )
-#             # Get recent history for context
-#             history_messages = await conv_service.get_recent_history(conversation_id, user_id, customer_id, max_messages=3)
-#             conversation_history = "\n".join(history_messages) if history_messages else ""
+            # Add user message
+            await conv_service.add_message(
+                conversation_id=conversation_id,
+                role="user",
+                user_id=user_id,
+                customer_id=customer_id,
+                content=request.query,
+                metadata={
+                    "project": request.project_name,
+                    "files": request.fileIds,
+                    "model": request.model
+                }
+            )
+            # Get recent history for context
+            history_messages = await conv_service.get_recent_history(conversation_id, user_id, customer_id, max_messages=3)
+            conversation_history = "\n".join(history_messages) if history_messages else ""
          
-#             adaptive_top_k = calculate_adaptive_top_k(request.query)
-#             effective_top_k = max(request.top_k, adaptive_top_k)
+            adaptive_top_k = calculate_adaptive_top_k(request.query)
+            effective_top_k = max(request.top_k, adaptive_top_k)
             
-#             query_emb = get_embeddings_from_llama([request.query], request.model)[0]
+            query_emb = get_embeddings_from_llama([request.query], request.model)[0]
     
-#             grouped_results = search_similar_with_project_grouping(collection_name, query_emb, request.fileIds, request.project_name, effective_top_k)
-#             print(f"🔍 Found results in projects: {list(grouped_results.keys())}")
-#            # top_chunks = [r.payload["text"] for r in results]
+            grouped_results = search_similar_with_project_grouping(collection_name, query_emb, request.fileIds, request.project_name, effective_top_k)
+            print(f"🔍 Found results in projects: {list(grouped_results.keys())}")
+           # top_chunks = [r.payload["text"] for r in results]
 
-#             #context = "\n\n".join(top_chunks)
-#             context_parts = []
-#             for project_name, results in grouped_results.items():
-#                 # Add project header
-#                 context_parts.append(f"## Information from Project: {project_name}")
+            #context = "\n\n".join(top_chunks)
+            context_parts = []
+            for project_name, results in grouped_results.items():
+                # Add project header
+                context_parts.append(f"## Information from Project: {project_name}")
                 
-#                 # Add top chunks from this project
-#                 top_chunks_from_project = [r.payload["text"] for r in results[:3]]  # Top 3 per project
-#                 for i, chunk in enumerate(top_chunks_from_project, 1):
-#                     context_parts.append(f"{i}. {chunk}")
+                # Add top chunks from this project
+                top_chunks_from_project = [r.payload["text"] for r in results[:3]]  # Top 3 per project
+                for i, chunk in enumerate(top_chunks_from_project, 1):
+                    context_parts.append(f"{i}. {chunk}")
                 
-#                 context_parts.append("")  # Empty line between projects
+                context_parts.append("")  # Empty line between projects
 
-#             context = "\n".join(context_parts)
-#             context_description = """
-# **CRITICAL: Project Attribution Rules:**
-# 1. When citing information, ALWAYS mention which project it comes from
-# 2. Format: "Based on Project [Project Name]..."
-# 3. If comparing across projects, say "Project A has X, while Project B has Y"
-# 4. If the user asks about a specific project, focus on that project's information
-# """
+            context = "\n".join(context_parts)
+            context_description = """
+**CRITICAL: Project Attribution Rules:**
+1. When citing information, ALWAYS mention which project it comes from
+2. Format: "Based on Project [Project Name]..."
+3. If comparing across projects, say "Project A has X, while Project B has Y"
+4. If the user asks about a specific project, focus on that project's information
+"""
 
-#             local_llama = LlmService()
-#             full_answer = ""
+            local_llama = LlmService()
+            full_answer = ""
             
-#             # Stream response with conversation_id in each chunk
-#             async for chunk in local_llama.get_llama_stream_completion(
-#                 question=request.query,
-#                 context=context,
-#                 conversation_history=conversation_history,
-#                 context_description=context_description
-#             ):
-#                 full_answer += chunk
-#                 yield f"data: {json.dumps({
-#                     'type': 'content', 
-#                     'content': chunk,
-#                     'conversation_id': conversation_id  # Include in content chunks
-#                 })}\n\n"
+            # Stream response with conversation_id in each chunk
+            async for chunk in local_llama.get_llama_stream_completion(
+                question=request.query,
+                context=context,
+                conversation_history=conversation_history,
+                context_description=context_description
+            ):
+                full_answer += chunk
+                yield f"data: {json.dumps({
+                    'type': 'content', 
+                    'content': chunk,
+                    'conversation_id': conversation_id  # Include in content chunks
+                })}\n\n"
 
-#             all_results_sorted = []
-#             for project_name, project_results in grouped_results.items():
-#                 for result in project_results:
-#                     all_results_sorted.append((result.score, result, project_name))
+            all_results_sorted = []
+            for project_name, project_results in grouped_results.items():
+                for result in project_results:
+                    all_results_sorted.append((result.score, result, project_name))
 
-#             # Sort by score descending
-#             all_results_sorted.sort(key=lambda x: x[0], reverse=True)
-#             # Add assistant response
-#             await conv_service.add_message(
-#                 conversation_id=conversation_id,
-#                 role="assistant",
-#                 user_id=user_id,
-#                 customer_id=customer_id,
-#                 content=full_answer,
-#                 metadata = {
-#                     "sources": [
-#                         {
-#                             "file_id": result.payload.get("file_id"),
-#                             "filename": result.payload.get("filename"),
-#                             "project": project_name,  # Include project name
-#                             "score": float(score)
-#                         }
-#                         for score, result, project_name in all_results_sorted[:3]
-#                     ]
-#                 }
-#             )
+            # Sort by score descending
+            all_results_sorted.sort(key=lambda x: x[0], reverse=True)
+            # Add assistant response
+            await conv_service.add_message(
+                conversation_id=conversation_id,
+                role="assistant",
+                user_id=user_id,
+                customer_id=customer_id,
+                content=full_answer,
+                metadata = {
+                    "sources": [
+                        {
+                            "file_id": result.payload.get("file_id"),
+                            "filename": result.payload.get("filename"),
+                            "project": project_name,  # Include project name
+                            "score": float(score)
+                        }
+                        for score, result, project_name in all_results_sorted[:3]
+                    ]
+                }
+            )
 
-#             formatted_results = []
+            formatted_results = []
 
-#             # Flatten and take top N results
-#             all_results = []
-#             for project_name, project_results in grouped_results.items():
-#                 # Check if project_results is not empty
-#                 if project_results:
-#                     all_results.extend([(r, project_name) for r in project_results])
+            # Flatten and take top N results
+            all_results = []
+            for project_name, project_results in grouped_results.items():
+                # Check if project_results is not empty
+                if project_results:
+                    all_results.extend([(r, project_name) for r in project_results])
 
-#             # Sort by score if we have results
-#             if all_results:
-#                 all_results.sort(key=lambda x: x[0].score, reverse=True)
+            # Sort by score if we have results
+            if all_results:
+                all_results.sort(key=lambda x: x[0].score, reverse=True)
                 
-#                 # Format top results (max 10)
-#                 for r, project_name in all_results[:10]:
-#                     # Get text safely
-#                     text = r.payload.get("text", "")
-#                     text_str = str(text) if text else ""
+                # Format top results (max 10)
+                for r, project_name in all_results[:10]:
+                    # Get text safely
+                    text = r.payload.get("text", "")
+                    text_str = str(text) if text else ""
                     
-#                     # Truncate if needed
-#                     if len(text_str) > 500:
-#                         truncated_text = text_str[:500] + "..."
-#                     else:
-#                         truncated_text = text_str
+                    # Truncate if needed
+                    if len(text_str) > 500:
+                        truncated_text = text_str[:500] + "..."
+                    else:
+                        truncated_text = text_str
                     
-#                     formatted_result = {
-#                         "file_id": str(r.payload.get("file_id", "")),
-#                         "filename": str(r.payload.get("filename", "")),
-#                         "project_name": str(project_name),
-#                         "score": round(float(r.score), 6),
-#                         "text": truncated_text,
-#                     }
-#                     formatted_results.append(formatted_result)
-#             else:
-#                 # Handle case with no results
-#                 logger.warning("No results found in grouped_results")
+                    formatted_result = {
+                        "file_id": str(r.payload.get("file_id", "")),
+                        "filename": str(r.payload.get("filename", "")),
+                        "project_name": str(project_name),
+                        "score": round(float(r.score), 6),
+                        "text": truncated_text,
+                    }
+                    formatted_results.append(formatted_result)
+            else:
+                # Handle case with no results
+                logger.warning("No results found in grouped_results")
 
-#             # Send sources
-#             sources_data = {
-#                 "type": "sources", 
-#                 "sources": formatted_results,
-#                 "conversation_id": conversation_id
-#             }
-#             yield f"data: {json.dumps(sources_data)}\n\n"
+            # Send sources
+            sources_data = {
+                "type": "sources", 
+                "sources": formatted_results,
+                "conversation_id": conversation_id
+            }
+            yield f"data: {json.dumps(sources_data)}\n\n"
                     
-#             # Send completion with conversation info
-#             conversation = await conv_service.get_conversation(conversation_id, user_id, customer_id)
-#             yield f"data: {json.dumps({
-#                 'type': 'done', 
-#                 'content': full_answer,
-#                 'conversation_id': conversation_id,
-#                 'history_length': len(conversation.get("messages", []))
-#             })}\n\n"
+            # Send completion with conversation info
+            conversation = await conv_service.get_conversation(conversation_id, user_id, customer_id)
+            yield f"data: {json.dumps({
+                'type': 'done', 
+                'content': full_answer,
+                'conversation_id': conversation_id,
+                'history_length': len(conversation.get("messages", []))
+            })}\n\n"
                     
-#         except Exception as e:
-#             error_msg = f"Error in stream processing: {str(e)}"
-#             logger.error(error_msg, exc_info=True)
-#             yield f"data: {json.dumps({'type': 'error', 'error': error_msg})}\n\n"
+        except Exception as e:
+            error_msg = f"Error in stream processing: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'error': error_msg})}\n\n"
 
-#     # FIXED: Provide default value for conversation_id in headers
-#     # We'll get it from the request or generate a placeholder
-#     request_conversation_id = getattr(request, 'conversation_id', None)
-#     headers_conversation_id = request_conversation_id or str(uuid.uuid4())
+    # FIXED: Provide default value for conversation_id in headers
+    # We'll get it from the request or generate a placeholder
+    request_conversation_id = getattr(request, 'conversation_id', None)
+    headers_conversation_id = request_conversation_id or str(uuid.uuid4())
     
-#     return StreamingResponse(
-#         generate(),
-#         media_type="text/event-stream",
-#         headers={
-#             "Cache-Control": "no-cache",
-#             "Connection": "keep-alive",
-#             "Access-Control-Allow-Origin": "*",
-#             "X-Accel-Buffering": "no",
-#             "X-Conversation-ID": headers_conversation_id  # Always a string
-#         },
-#     )
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+            "X-Accel-Buffering": "no",
+            "X-Conversation-ID": headers_conversation_id  # Always a string
+        },
+    )
 
 
 

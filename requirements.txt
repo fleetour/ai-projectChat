@@ -1,6 +1,7 @@
 fastapi
 uvicorn
 requests
+mistralai
 faiss-cpu
 python-docx
 pdfminer.six
