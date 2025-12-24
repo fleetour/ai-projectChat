@@ -38,7 +38,9 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Local Qdrant RAG with Cloud Embeddings")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:4200"],
+    allow_origins=["http://localhost:4200", 
+                   "https://projectgpt-ed262.web.app"
+                   "https://dev.projectsgpt.ai"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
