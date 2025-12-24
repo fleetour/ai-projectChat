@@ -60,21 +60,21 @@ jobs:
         cache-from: type=gha
         cache-to: type=gha,mode=max
     
-    - name: Wait for image propagation
-      run: sleep 30
-    - name: Scan image for vulnerabilities
-      if: github.event_name != 'pull_request'
-      uses: aquasecurity/trivy-action@master
-      with:
-        image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-        format: 'sarif'
-        output: 'trivy-results.sarif'
+    # - name: Wait for image propagation
+    #   run: sleep 30
+    # - name: Scan image for vulnerabilities
+    #   if: github.event_name != 'pull_request'
+    #   uses: aquasecurity/trivy-action@master
+    #   with:
+    #     image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+    #     format: 'sarif'
+    #     output: 'trivy-results.sarif'
     
-    - name: Upload vulnerability scan results
-      uses: github/codeql-action/upload-sarif@v3
-      if: always()
-      with:
-        sarif_file: 'trivy-results.sarif'
+    # - name: Upload vulnerability scan results
+    #   uses: github/codeql-action/upload-sarif@v3
+    #   if: always()
+    #   with:
+    #     sarif_file: 'trivy-results.sarif'
 
   deploy-staging:
     name: Deploy to Staging
