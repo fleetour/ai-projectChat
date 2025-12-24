@@ -358,11 +358,12 @@ async def query_docs_stream(request: QueryRequest,
                 context_description=context_description
             ):
                 full_answer += chunk
-                yield f"data: {json.dumps({
+                content_data = {
                     'type': 'content', 
                     'content': chunk,
-                    'conversation_id': conversation_id  # Include in content chunks
-                })}\n\n"
+                    'conversation_id': conversation_id
+                }
+                yield f"data: {json.dumps(content_data)}\n\n"
 
             all_results_sorted = []
             for project_name, project_results in grouped_results.items():
@@ -438,17 +439,19 @@ async def query_docs_stream(request: QueryRequest,
                     
             # Send completion with conversation info
             conversation = await conv_service.get_conversation(conversation_id, user_id, customer_id)
-            yield f"data: {json.dumps({
+            done_data = {
                 'type': 'done', 
                 'content': full_answer,
                 'conversation_id': conversation_id,
                 'history_length': len(conversation.get("messages", []))
-            })}\n\n"
+            }
+            yield f"data: {json.dumps(done_data)}\n\n"
                     
         except Exception as e:
             error_msg = f"Error in stream processing: {str(e)}"
             logger.error(error_msg, exc_info=True)
-            yield f"data: {json.dumps({'type': 'error', 'error': error_msg})}\n\n"
+            error_data = {'type': 'error', 'error': error_msg}
+            yield f"data: {json.dumps(error_data)}\n\n"
 
     # FIXED: Provide default value for conversation_id in headers
     # We'll get it from the request or generate a placeholder
