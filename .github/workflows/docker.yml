@@ -10,7 +10,7 @@ on:
 
 env:
   REGISTRY: docker.io
-  IMAGE_NAME: ${{ github.repository }}
+  IMAGE_NAME: fleetur/ai-projectchat
 
 jobs:
  
@@ -69,7 +69,7 @@ jobs:
         output: 'trivy-results.sarif'
     
     - name: Upload vulnerability scan results
-      uses: github/codeql-action/upload-sarif@v2
+      uses: github/codeql-action/upload-sarif@v3
       if: always()
       with:
         sarif_file: 'trivy-results.sarif'
