@@ -181,23 +181,31 @@ def search_similar_with_project_grouping(collection_name: str, query_vector: lis
         query_filter = {"must": [{"key": "project", "match": {"value": project_name}}]}
     
     try:
-        results = client.search(
+        results = client.query_points(
             collection_name=collection_name,
-            query_vector=query_vector,
+            query=query_vector,
             limit=top_k * 3,  # Get more results to group by project
             query_filter=query_filter,
             with_payload=True,
         )
         
-        # Group results by project
         grouped_results = {}
-        for result in results:
-            project_id = result.payload.get("project") or "Unknown Project"
+        # for result in results:
+        #     project_id = result.payload.get("project") or "Unknown Project"
+        #     if project_id not in grouped_results:
+        #         grouped_results[project_id] = []
+        #     grouped_results[project_id].append(result)
+        
+        for scored_point in results.points:  # Use descriptive variable name
+            payload = scored_point.payload
+            project_id = payload.get("project") or "Unknown Project"
+            
             if project_id not in grouped_results:
                 grouped_results[project_id] = []
-            grouped_results[project_id].append(result)
-        
-        logger.info(f"✅ Search found {len(results)} results grouped into {len(grouped_results)} projects")
+
+            grouped_results[project_id].append(scored_point)
+
+        logger.info(f"✅ Search found {len(results.points)} results grouped into {len(grouped_results)} projects")
         return grouped_results
         
     except Exception as e:
@@ -232,20 +240,23 @@ def search_similar(collection_name: str, query_vector: list, file_ids: Optional[
     print(f"filter: {query_filter}")
 
     try:
-        results = client.search(
+        results = client.query_points(
             collection_name=collection_name,
-            query_vector=query_vector,
+            query=query_vector,
             limit=top_k,
             query_filter=query_filter,
             with_payload=True, 
         )
-        logger.info(f"✅ Search found {len(results)} results from {collection_name}")
+        
+        # FIX: Return results.points, not results
+        points = results.points
+        logger.info(f"✅ Search found {len(points)} results from {collection_name}")
         
         # Debug logging
         if query_filter:
             logger.debug(f"🔍 Query filter applied: {query_filter}")
         
-        return results
+        return points  # Return the list of ScoredPoint objects
     except Exception as e:
         logger.error(f"❌ Error searching in {collection_name}: {e}")
         raise
