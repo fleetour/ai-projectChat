@@ -283,7 +283,8 @@ async def query_docs_stream(request: QueryRequest,
         
         try:
             print(f"🎯 STARTING QUERY STREAM: '{request.query}'")
-            
+            await ensure_collection_async(collection_name, vector_size=VECTOR_SIZE)
+
             # Get conversation ID from request or generate
             conversation_id = getattr(request, 'conversation_id', None)
            
