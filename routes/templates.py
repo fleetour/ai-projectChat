@@ -69,7 +69,7 @@ async def upload_templates(
     target_path: str = Form(""),
     category: str = Form(""),
     files: List[UploadFile] = File(...),
-    customer_id: str = Header(default="1")  # Or from auth/token
+    customer_id: str = Depends(get_customer_id),
 ):
     """
     Async upload template files with Azure Blob Storage.
