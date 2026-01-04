@@ -39,7 +39,8 @@ app = FastAPI(title="Local Qdrant RAG with Cloud Embeddings")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:4200", 
-                   "https://projectgpt-ed262.web.app"
+                   "https://projectgpt-ed262.web.app",
+                   "https://projectour-49ace.web.app",
                    "https://dev.projectsgpt.ai"],
     allow_credentials=True,
     allow_methods=["*"],
